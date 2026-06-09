@@ -18,6 +18,7 @@ from atmcp import db, hub, redis_bus
 from atmcp.config import settings
 from atmcp.ids import hash_token, token_matches
 from atmcp.services import identity as identity_svc
+from atmcp.services import presence as presence_svc
 from atmcp.services import status as status_svc
 from atmcp.services import tasks as tasks_svc
 
@@ -144,6 +145,36 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="unknown team")
         _check_dashboard(team, token)
         return await status_svc.get_team_status(team["team_id"])
+
+    @app.post("/api/teams/{team_name}/heartbeat")
+    async def rest_heartbeat(
+        team_name: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Out-of-band presence: a sidecar/cron/hook can keep an agent 'online' on a timer
+        without the LLM having to call the MCP heartbeat tool. Auth = the team join token."""
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        token = _bearer(authorization) or x_atmcp_token
+        join_hash = await db.fetchval(
+            "SELECT join_token_hash FROM teams WHERE team_id=?", (team["team_id"],)
+        )
+        if not token or not join_hash or not token_matches(token, join_hash):
+            raise HTTPException(status_code=401, detail="invalid join token")
+        display_name = (body or {}).get("display_name")
+        if not display_name:
+            raise HTTPException(status_code=400, detail="display_name required")
+        return await presence_svc.heartbeat_named(
+            team["team_id"],
+            display_name,
+            (body or {}).get("status_summary"),
+            (body or {}).get("current_task_id"),
+            (body or {}).get("progress_pct"),
+            (body or {}).get("capabilities"),
+        )
 
     @app.websocket("/ws/{team_name}")
     async def ws(websocket: WebSocket, team_name: str) -> None:

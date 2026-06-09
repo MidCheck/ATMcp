@@ -54,3 +54,32 @@ async def test_create_team_and_snapshot(client):
 
         r = await c.get("/api/teams/does-not-exist/snapshot")
         assert r.status_code == 404
+
+
+async def test_rest_heartbeat_creates_and_shows_agent(client):
+    async with client as c:
+        r = await c.post(
+            "/api/teams", json={"name": "hbteam"},
+            headers={"X-Admin-Token": settings.admin_token},
+        )
+        team = r.json()
+
+        # Sidecar heartbeat (REST, join-token auth) registers/refreshes the agent.
+        r = await c.post(
+            "/api/teams/hbteam/heartbeat",
+            json={"display_name": "sidecar-bob", "status_summary": "alive"},
+            headers={"Authorization": f"Bearer {team['join_token']}"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] and r.json()["agent_id"]
+
+        snap = (await c.get("/api/teams/hbteam/snapshot")).json()
+        assert any(a["display_name"] == "sidecar-bob" for a in snap["agents"])
+
+        # Wrong token is rejected.
+        r = await c.post(
+            "/api/teams/hbteam/heartbeat",
+            json={"display_name": "x"},
+            headers={"Authorization": "Bearer nope"},
+        )
+        assert r.status_code == 401

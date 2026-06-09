@@ -67,24 +67,32 @@ pip install -r requirements.txt
 python -m atmcp.admin create-team my-team
 ```
 
-## Connect an agent (Claude Code)
+## Connect an agent
 
-Point any streamable-HTTP MCP client at `https://<host>/mcp`, carrying the team join token
-in a header. For Claude Code:
+Point any streamable-HTTP MCP client at `http://<host>:8000/mcp`, carrying the team join
+token (and an optional stable agent name) in headers. With the headers set, the agent is
+**auto-joined on its first tool call** — no explicit `join_team` needed.
 
 ```bash
-claude mcp add --transport http atmcp https://<host>/mcp \
-  --header "Authorization: Bearer <join_token>"
+# Claude Code
+claude mcp add --transport http atmcp http://<host>:8000/mcp \
+  --header "Authorization: Bearer <join_token>" \
+  --header "X-ATMcp-Agent: alice"
 ```
 
-Then, from the agent, the first call is `join_team`:
+> **Adding the server only makes the tools _available_.** Agents (Claude/Cursor/Qwen) won't
+> report anything until told to — MCP is *pull, not push*, and LLMs have no timer. So:
+> 1. Give each agent the workflow prompt — ready-to-paste rules for Claude Code / Cursor /
+>    Qwen are in **[`prompts/`](prompts/)**.
+> 2. For reliable presence (stay "online" even while only thinking), run the sidecar — it
+>    heartbeats over REST, decoupled from the LLM:
+>    ```bash
+>    python scripts/atmcp_heartbeat.py --url http://<host>:8000 \
+>      --team <team> --token <join_token> --name alice --interval 10
+>    ```
 
-```
-join_team(team_name="my-team", display_name="alice", capabilities=["python"])
-```
-
-After that, run `heartbeat` on a ~10s timer and use the knowledge/memory/task tools. (The
-join token can also be passed directly to `join_team` if your client can't set headers.)
+If your client can't set headers, the agent passes the token to `join_team` directly:
+`join_team(team_name="my-team", display_name="alice", join_token="<join_token>")`.
 
 ## Dashboard
 
@@ -150,4 +158,14 @@ atmcp/
   schema.sql        full DDL (+ FTS5)
   services/         identity · presence · knowledge · memory · tasks · status · clock
   static/           dashboard.html + dashboard.js
+prompts/            ready-to-paste agent rules (Claude Code / Cursor / Qwen)
+scripts/            atmcp_heartbeat.py — presence sidecar (REST, no deps)
 ```
+
+## Making agents actually use it
+
+MCP is pull, not push: the tools are available, but the model decides when to call them and
+has no timer. See **[`prompts/`](prompts/README.md)** for the per-client workflow rules, the
+auto-join headers (`Authorization` + `X-ATMcp-Agent`), and three ways to keep presence fresh
+(model-driven, the sidecar, or a client hook). The REST presence endpoint
+`POST /api/teams/{team}/heartbeat` (auth = join token) backs the sidecar.

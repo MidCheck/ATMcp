@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from atmcp import db, redis_bus
+from atmcp.ids import hash_token
 
 
 class NotJoinedError(Exception):
@@ -55,6 +56,14 @@ def header_token_from_ctx(ctx: Any) -> str | None:
     return req.headers.get("x-atmcp-token")
 
 
+def agent_name_from_ctx(ctx: Any) -> str | None:
+    """Optional stable display_name supplied via the MCP client's headers."""
+    req = getattr(ctx.request_context, "request", None)
+    if req is None:
+        return None
+    return req.headers.get("x-atmcp-agent")
+
+
 async def resolve(ctx: Any) -> Caller:
     sid = session_id_from_ctx(ctx)
     if not sid:
@@ -73,4 +82,26 @@ async def resolve(ctx: Any) -> Caller:
             caller = Caller(rec["team_id"], rec["agent_id"], row["display_name"], sid)
             _sessions[sid] = caller
             return caller
+
+    # Auto-join: if the request carries a valid join token, join transparently so the
+    # first tool call works without an explicit join_team. The token maps to exactly one
+    # team. Set the X-ATMcp-Agent header for a stable display_name across reconnects;
+    # otherwise a per-session name is generated (which would create a fresh roster entry).
+    token = header_token_from_ctx(ctx)
+    if token:
+        team = await db.fetchone(
+            "SELECT name FROM teams WHERE join_token_hash=?", (hash_token(token),)
+        )
+        if team is not None:
+            from atmcp.services import identity as identity_svc  # lazy: avoid import cycle
+
+            display_name = agent_name_from_ctx(ctx) or f"agent-{sid[:8]}"
+            try:
+                await identity_svc.join_team(sid, team["name"], token, display_name)
+            except Exception:  # noqa: BLE001  (e.g. a display_name race) — fall through
+                pass
+            caller = _sessions.get(sid)
+            if caller is not None:
+                return caller
+
     raise NotJoinedError("session not joined to a team; call join_team first")

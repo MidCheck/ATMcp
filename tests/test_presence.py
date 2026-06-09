@@ -52,3 +52,11 @@ async def test_rejoin_reuses_agent_id(team):
     assert a1.agent_id == a2.agent_id
     agents = await identity_svc.list_agents(team["team_id"])
     assert sum(1 for x in agents if x["display_name"] == "alice") == 1
+
+
+async def test_heartbeat_named_upserts_same_agent(team):
+    r1 = await p.heartbeat_named(team["team_id"], "ext-agent", status_summary="hi")
+    r2 = await p.heartbeat_named(team["team_id"], "ext-agent", progress_pct=50)
+    assert r1["agent_id"] == r2["agent_id"]  # stable across REST heartbeats
+    agents = await identity_svc.list_agents(team["team_id"])
+    assert sum(1 for x in agents if x["display_name"] == "ext-agent") == 1
