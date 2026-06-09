@@ -14,8 +14,9 @@ directly if you prefer not to set headers.)
 
 ## 2. Tell the agent the workflow
 
-Append the contents of [`agent-workflow.md`](agent-workflow.md) to your project's
-`CLAUDE.md` (or pass it via `--append-system-prompt "$(cat prompts/agent-workflow.md)"`).
+Append the contents of [`agent-workflow.md`](agent-workflow.md) (中文版:
+[`agent-workflow.zh-CN.md`](agent-workflow.zh-CN.md)) to your project's `CLAUDE.md`
+(or pass it via `--append-system-prompt "$(cat prompts/agent-workflow.md)"`).
 
 ## 3. Keep presence fresh
 

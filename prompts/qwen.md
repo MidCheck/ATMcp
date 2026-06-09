@@ -30,8 +30,8 @@ If your runtime cannot send custom headers, pass the token explicitly from the a
 
 ## 2. System prompt
 
-Prepend the contents of [`agent-workflow.md`](agent-workflow.md) to the model's system
-prompt.
+Prepend the contents of [`agent-workflow.md`](agent-workflow.md) (中文版:
+[`agent-workflow.zh-CN.md`](agent-workflow.zh-CN.md)) to the model's system prompt.
 
 ## 3. Presence sidecar (recommended)
 

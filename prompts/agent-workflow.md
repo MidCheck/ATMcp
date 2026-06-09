@@ -1,5 +1,7 @@
 # ATMcp agent workflow (canonical instruction)
 
+**English** · [中文](agent-workflow.zh-CN.md)
+
 Paste this into your agent's system prompt / rules so it actually *uses* the team tools.
 MCP tools are "pull, not push": the model only calls them when told to, and it has no
 timer — so this guidance (plus the presence sidecar for reliable online status) is what

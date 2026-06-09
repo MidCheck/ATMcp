@@ -8,8 +8,9 @@ Adding the MCP server only makes the tools *available*. Agents (Claude Code, Cur
    - `X-ATMcp-Agent: <display_name>` — recommended; a stable name across reconnects.
      (Without it a per-session name like `agent-1a2b3c4d` is generated, creating a new
      roster entry each reconnect.)
-2. **Give the agent the workflow** — paste [`agent-workflow.md`](agent-workflow.md) into the
-   agent's system prompt / rules (client-specific files below).
+2. **Give the agent the workflow** — paste [`agent-workflow.md`](agent-workflow.md)
+   (中文版:[`agent-workflow.zh-CN.md`](agent-workflow.zh-CN.md)) into the agent's system
+   prompt / rules (client-specific files below).
 3. **For reliable presence**, run the sidecar so the agent stays "online" even while it's
    thinking and not calling tools:
    ```bash

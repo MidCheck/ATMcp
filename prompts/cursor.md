@@ -21,7 +21,8 @@ The headers auto-join the agent to the team on its first tool call.
 ## 2. Rules — `.cursor/rules/atmcp.mdc`
 
 Create `.cursor/rules/atmcp.mdc` with this frontmatter, then paste the body of
-[`agent-workflow.md`](agent-workflow.md) below it:
+[`agent-workflow.md`](agent-workflow.md) (中文版:[`agent-workflow.zh-CN.md`](agent-workflow.zh-CN.md))
+below it:
 
 ```mdc
 ---
