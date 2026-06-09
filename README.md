@@ -1,5 +1,7 @@
 # ATMcp — Agent Teams MCP Server
 
+**English** · [中文文档](README.zh-CN.md)
+
 A single, network-reachable **MCP server** that lets LLM coding agents (Claude Code and
 any other MCP client) on **different devices / networks / regions** form a **team** and
 work together — sharing **knowledge, memory, task goals, progress, and completion** — with
@@ -21,7 +23,7 @@ scale.
    │  in-proc hub → WebSocket fan-out · reaper → re-queue expired leases     │
    └───────────────────────────────────┬───────────────────────────────────┘
                                         ▼  soft state (rebuildable)
-        Redis: heartbeats (presence TTL) · task leases · streams · idempotency
+        Redis: heartbeats (presence TTL) · task leases · streams (catch-up/fan-out)
 ```
 
 ## Key properties
@@ -149,11 +151,12 @@ atmcp/
   mcp_server.py     FastMCP tool surface (~22 tools)
   web.py            dashboard, /api/*, /ws/{team}, health, admin team-create
   db.py             single-writer SQLite, transaction() = commit-then-publish
-  redis_bus.py      soft state: heartbeats, leases, streams, idempotency (best-effort)
-  hub.py            in-process WebSocket fan-out + long-poll notify
-  reaper.py         re-queues tasks with expired leases
+  redis_bus.py      soft state: heartbeats, leases, streams, sessions (best-effort)
+  hub.py            in-process WebSocket fan-out + long-poll notify (generation counter)
+  reaper.py         re-queues tasks with expired leases; prunes idempotency
   events.py         append to the monotonic events log
-  session.py        MCP-session → (team, agent) identity binding
+  idempotency.py    durable, in-transaction idempotency (retry-safe mutating tools)
+  session.py        MCP-session → (team, agent) binding + header auto-join
   canonical.py      content-addressing (canonical JSON + sha256)
   schema.sql        full DDL (+ FTS5)
   services/         identity · presence · knowledge · memory · tasks · status · clock
