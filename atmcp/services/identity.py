@@ -182,6 +182,16 @@ async def leave_team(caller: Caller) -> dict[str, Any]:
     return {"ok": True, "requeued_tasks": requeued}
 
 
+async def resolve_agent_ref(team_id: str, ref: str) -> str | None:
+    """Resolve an agent reference (agent_id or display_name) → agent_id (exact id wins)."""
+    row = await db.fetchone(
+        "SELECT agent_id FROM agents WHERE team_id=? AND (agent_id=? OR display_name=?) "
+        "ORDER BY (agent_id=?) DESC LIMIT 1",
+        (team_id, ref, ref, ref),
+    )
+    return row["agent_id"] if row is not None else None
+
+
 async def list_agents(team_id: str) -> list[dict[str, Any]]:
     rows = await db.fetchall(
         "SELECT agent_id, display_name, capabilities_json, joined_at, last_seen, "

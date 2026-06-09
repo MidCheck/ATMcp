@@ -116,10 +116,11 @@ CREATE TABLE IF NOT EXISTS team_clock (
 -- Old rows are pruned by the reaper (retention = ATMCP_IDEM_TTL_S).
 CREATE TABLE IF NOT EXISTS idempotency (
   team_id     TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,                 -- scope keys to the caller (no cross-agent collisions)
   idem_key    TEXT NOT NULL,
   result_json TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
-  PRIMARY KEY (team_id, idem_key)
+  PRIMARY KEY (team_id, agent_id, idem_key)
 );
 CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_at);
 
@@ -177,6 +178,37 @@ CREATE TABLE IF NOT EXISTS task_claims (
   outcome       TEXT                              -- done|failed|expired|released
 );
 CREATE INDEX IF NOT EXISTS idx_claims_team_task ON task_claims(team_id, task_id);
+
+-- ── Directives: point-to-point commands (console -> a specific agent) ───────
+CREATE TABLE IF NOT EXISTS directives (
+  directive_id   TEXT PRIMARY KEY,
+  team_id        TEXT NOT NULL,
+  from_agent     TEXT NOT NULL,                 -- issuer (the console)
+  to_agent       TEXT NOT NULL,                 -- target agent_id
+  instruction    TEXT NOT NULL,
+  payload_json   TEXT NOT NULL DEFAULT '{}',
+  status         TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed|canceled
+  priority       INTEGER NOT NULL DEFAULT 0,
+  result_summary TEXT,
+  result_output  TEXT,                          -- final result text from the worker
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  last_event_id  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_directives_inbox ON directives(team_id, to_agent, status, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_directives_from  ON directives(team_id, from_agent, created_at);
+
+-- ── Agent output stream: what each agent is printing (for "view agent output") ─
+CREATE TABLE IF NOT EXISTS agent_output (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- monotonic tail cursor
+  team_id      TEXT NOT NULL,
+  agent_id     TEXT NOT NULL,
+  directive_id TEXT,
+  source       TEXT NOT NULL DEFAULT 'agent',      -- agent | hook
+  text         TEXT NOT NULL,
+  ts           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_output_tail ON agent_output(team_id, agent_id, id);
 
 -- ── Events: monotonic activity log (audit + replay + dashboard feed) ─────────
 CREATE TABLE IF NOT EXISTS events (

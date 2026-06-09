@@ -31,7 +31,7 @@ async def set_memory(
 
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         cur = await tx.fetchone(
@@ -49,7 +49,7 @@ async def set_memory(
                 "current_writer": cur["writer_agent"] if cur is not None else None,
             }
             if idem_key:
-                await idempotency.store(tx, team_id, idem_key, conflict)
+                await idempotency.store(tx, team_id, caller.agent_id, idem_key, conflict)
             return conflict
 
         lclock = await clock.bump(tx, team_id)
@@ -77,7 +77,7 @@ async def set_memory(
         )
         result = {"ok": True, "key": key, "version": new_version, "lclock": lclock}
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     return result
 
 

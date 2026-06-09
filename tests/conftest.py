@@ -14,6 +14,7 @@ from atmcp.services import identity as identity_svc
 @pytest_asyncio.fixture
 async def store(tmp_path):
     await db.init(str(tmp_path / "atmcp_test.db"))
+    db.set_publisher(hub.dispatch)  # events bump the hub generation (wake long-polls)
     try:
         yield
     finally:

@@ -72,7 +72,7 @@ async def create_task(
     now = now_ms()
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         await tx.execute(
@@ -94,7 +94,7 @@ async def create_task(
         )
         result = {"ok": True, "task_id": task_id, "event_id": eid}
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     return result
 
 
@@ -152,12 +152,12 @@ async def claim_task(caller: Caller, task_id: str, idem_key: str | None = None) 
     team_id = caller.team_id
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         result = await _do_claim(tx, caller, task_id)
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     if result.get("ok"):
         await redis_bus.set_lease(team_id, result["task_id"], caller.agent_id,
                                   result["fencing_token"], result["lease_ttl_s"])
@@ -170,7 +170,7 @@ async def claim_next_task(
     team_id = caller.team_id
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         row = await tx.fetchone(
@@ -187,7 +187,7 @@ async def claim_next_task(
         else:
             result = await _do_claim(tx, caller, row["task_id"])
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     if result.get("ok"):
         await redis_bus.set_lease(team_id, result["task_id"], caller.agent_id,
                                   result["fencing_token"], result["lease_ttl_s"])
@@ -261,7 +261,7 @@ async def complete_task(
     now = now_ms()
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         task = await tx.fetchone(
@@ -306,7 +306,7 @@ async def complete_task(
             result = {"ok": True, "task_id": task_id, "event_id": eid,
                       "eligible_unblocked": [r["task_id"] for r in newly]}
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     if result.get("ok"):
         await redis_bus.del_lease(team_id, task_id)
     return result

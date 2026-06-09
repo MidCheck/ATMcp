@@ -18,6 +18,7 @@ from atmcp import db, hub, redis_bus
 from atmcp.config import settings
 from atmcp.ids import hash_token, token_matches
 from atmcp.services import identity as identity_svc
+from atmcp.services import output as output_svc
 from atmcp.services import presence as presence_svc
 from atmcp.services import status as status_svc
 from atmcp.services import tasks as tasks_svc
@@ -174,6 +175,35 @@ def register(app: FastAPI) -> None:
             (body or {}).get("current_task_id"),
             (body or {}).get("progress_pct"),
             (body or {}).get("capabilities"),
+        )
+
+    @app.post("/api/teams/{team_name}/agents/{agent_ref}/output")
+    async def rest_output(
+        team_name: str,
+        agent_ref: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Out-of-band output capture (e.g. a Claude Code hook shipping its transcript tail).
+        Auth = the team join token; agent_ref is a display_name or agent_id."""
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        token = _bearer(authorization) or x_atmcp_token
+        join_hash = await db.fetchval(
+            "SELECT join_token_hash FROM teams WHERE team_id=?", (team["team_id"],)
+        )
+        if not token or not join_hash or not token_matches(token, join_hash):
+            raise HTTPException(status_code=401, detail="invalid join token")
+        agent_id = await identity_svc.resolve_agent_ref(team["team_id"], agent_ref)
+        if agent_id is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        text = (body or {}).get("text")
+        if not text:
+            raise HTTPException(status_code=400, detail="text required")
+        return await output_svc.append_output(
+            team["team_id"], agent_id, text, (body or {}).get("directive_id"), source="hook"
         )
 
     @app.websocket("/ws/{team_name}")

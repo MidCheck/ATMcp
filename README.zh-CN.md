@@ -105,6 +105,33 @@ MCP 是**拉,不是推**:工具是"可用"的,但模型自己决定何时调用,
 状态的三种方式(模型自驱 / sidecar / 客户端 hook)。REST 在线端点
 `POST /api/teams/{team}/heartbeat`(用 join token 鉴权)即 sidecar 的后端。
 
+## 团队控制台 —— 在一个窗口里管理整个团队
+
+一个交互式 **console** 窗口 + N 个后台 **worker** 循环。在 console 里你可以:列出所有 agent 的状态
+与 TODO、给**某个指定 agent**发指令、等它的结果、实时查看另一个 agent 的输出 —— 解决"一个人同一
+时刻只能待在一个 agent shell"。
+
+```
+  你 ── /team ──►  Console agent ──MCP──►  ATMcp  ◄──MCP── Worker agents(/loop /atmcp-worker)
+       命令         send_directive ───────► directives ──► inbox → claim → 执行
+       结果   ◄──  wait_directive  ◄─────── (状态)    ◄── report_directive
+       输出   ◄──  get_agent_output ◄────── agent_output ◄ append_output / hook
+```
+
+```
+/team status                 # 名册(在线·当前任务·进度)+ TODO 看板
+/team send bob "重构 X"      # 给指定 agent 发指令 → 返回 directive_id
+/team watch <directive_id>   # 长轮询直到 bob 上报 done/失败,打印结果
+/team logs bob --follow      # 实时 tail bob 的输出
+/team dispatch "修 flaky 测试"  # 不指定 agent → 谁空谁认领的任务
+```
+
+服务端是**指令总线**(`send_directive`/`inbox`/`claim_directive`/`report_directive`/
+`wait_directive`)+ **Agent 输出流**(`append_output`/`get_agent_output`,以及给 hook 用的
+`POST /api/teams/{team}/agents/{agent}/output`)。worker 用 `atmcp-worker` 技能配 `/loop` 常驻;
+"watch/通知"靠长轮询实现 —— worker 一上报,结果立刻出现在你的 console shell 里。详见
+**[`prompts/console-worker.md`](prompts/console-worker.md)** 与 **[`skills/`](skills/)**。
+
 ## 网页看板
 
 打开 `http://<host>:8000/dashboard?team=<队名>` —— Agent 卡片(绿/黄/灰 实时在线徽标)、任务看板、
@@ -120,6 +147,8 @@ MCP 是**拉,不是推**:工具是"可用"的,但模型自己决定何时调用,
 | 知识 | `post_knowledge`、`search_knowledge`、`retract_knowledge` |
 | 记忆 | `set_memory`、`get_memory` |
 | 目标/任务 | `create_goal`、`create_task`、`claim_task`、`claim_next_task`、`update_task_progress`、`complete_task`、`fail_task`、`release_task`、`list_tasks` |
+| 指令(点对点) | `send_directive`、`inbox`、`claim_directive`、`report_directive`、`wait_directive`、`cancel_directive`、`list_directives` |
+| 输出流 | `append_output`、`get_agent_output` |
 | 状态/同步 | `list_agents`、`get_team_status`、`sync` |
 
 所有写工具都接受可选的 `idem_key`(幂等)。预期内的情况以**数据**返回(`{conflict}`、`{taken_by}`、
@@ -156,21 +185,23 @@ pytest -q     # 服务级测试:认领竞争、fencing/僵尸、reaper、去重�
 ```
 atmcp/
   app.py            FastAPI 组装 + lifespan(挂载 /mcp,接线发布器)
-  mcp_server.py     FastMCP 工具面(~22 个工具)
-  web.py            看板、/api/*、/ws/{team}、健康检查、admin 建团、REST 心跳
+  mcp_server.py     FastMCP 工具面(~33 个工具)
+  web.py            看板、/api/*、/ws/{team}、REST 心跳/输出、健康检查、admin 建团
   db.py             单写者 SQLite,transaction() = 提交后发布
   redis_bus.py      软状态:心跳、租约、事件流、会话(尽力而为)
   hub.py            进程内 WebSocket 扇出 + 长轮询唤醒(代际计数器)
-  reaper.py         回收过期租约的任务;清理幂等表
+  reaper.py         回收过期租约的任务;清理幂等表与 agent 输出
   events.py         追加到单调 events 日志
   idempotency.py    事务内的持久幂等(写工具可安全重试)
   session.py        MCP 会话 →(team, agent)身份绑定 + 请求头自动 join
   canonical.py      内容寻址(规范化 JSON + sha256)
   schema.sql        完整 DDL(含 FTS5)
   services/         identity · presence · knowledge · memory · tasks · status · clock
+                    · directives(console→agent 指令)· output(agent 输出流)
   static/           dashboard.html + dashboard.js
-prompts/            现成的 Agent 规则(Claude Code / Cursor / Qwen)
-scripts/            atmcp_heartbeat.py —— 在线状态 sidecar(纯 REST,无依赖)
+prompts/            现成的 Agent 规则 + console/worker 配置说明
+scripts/            atmcp_heartbeat.py(在线 sidecar)· atmcp_output_hook.py(输出 hook)
+skills/             team(控制台)+ atmcp-worker(worker 循环)Claude Code 技能
 ```
 
 ## 许可

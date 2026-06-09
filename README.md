@@ -112,6 +112,8 @@ Auth is **off by default**; set `ATMCP_DASHBOARD_AUTH=1` to require a per-team r
 | Knowledge | `post_knowledge`, `search_knowledge`, `retract_knowledge` |
 | Memory | `set_memory`, `get_memory` |
 | Goals/Tasks | `create_goal`, `create_task`, `claim_task`, `claim_next_task`, `update_task_progress`, `complete_task`, `fail_task`, `release_task`, `list_tasks` |
+| Directives | `send_directive`, `inbox`, `claim_directive`, `report_directive`, `wait_directive`, `cancel_directive`, `list_directives` |
+| Output | `append_output`, `get_agent_output` |
 | Status/Sync | `list_agents`, `get_team_status`, `sync` |
 
 Every mutating tool accepts an optional `idem_key` (idempotency). Expected conditions are
@@ -148,22 +150,44 @@ pytest -q            # service-level tests: claim race, fencing/zombie, reaper,
 ```
 atmcp/
   app.py            FastAPI assembly + lifespan (mounts /mcp, wires publisher)
-  mcp_server.py     FastMCP tool surface (~22 tools)
-  web.py            dashboard, /api/*, /ws/{team}, health, admin team-create
+  mcp_server.py     FastMCP tool surface (~33 tools)
+  web.py            dashboard, /api/*, /ws/{team}, REST heartbeat/output, health, admin
   db.py             single-writer SQLite, transaction() = commit-then-publish
   redis_bus.py      soft state: heartbeats, leases, streams, sessions (best-effort)
   hub.py            in-process WebSocket fan-out + long-poll notify (generation counter)
-  reaper.py         re-queues tasks with expired leases; prunes idempotency
+  reaper.py         re-queues expired-lease tasks; prunes idempotency + agent output
   events.py         append to the monotonic events log
   idempotency.py    durable, in-transaction idempotency (retry-safe mutating tools)
   session.py        MCP-session → (team, agent) binding + header auto-join
   canonical.py      content-addressing (canonical JSON + sha256)
   schema.sql        full DDL (+ FTS5)
   services/         identity · presence · knowledge · memory · tasks · status · clock
+                    · directives (console→agent commands) · output (agent output stream)
   static/           dashboard.html + dashboard.js
-prompts/            ready-to-paste agent rules (Claude Code / Cursor / Qwen)
-scripts/            atmcp_heartbeat.py — presence sidecar (REST, no deps)
+prompts/            ready-to-paste agent rules + console/worker setup
+scripts/            atmcp_heartbeat.py (presence sidecar) · atmcp_output_hook.py
+skills/             team (console) + atmcp-worker (worker loop) Claude Code skills
 ```
+
+## Team console — manage the whole team from one window
+
+One interactive **console** window + N background **worker** loops. From the console you list
+everyone's status & TODOs, send a directive to a *specific* agent, watch its result, and tail
+another agent's live output. See **[`prompts/console-worker.md`](prompts/console-worker.md)**
+and the **[`skills/`](skills/)** (`/team` console + `/atmcp-worker` loop).
+
+```
+/team status                 # roster + TODO board
+/team send bob "refactor X"  # → directive_id
+/team watch <directive_id>   # long-polls until bob reports done/failed, prints result
+/team logs bob --follow      # live-tail bob's output
+```
+
+Server-side this is the **directive bus** (`send_directive`/`inbox`/`claim_directive`/
+`report_directive`/`wait_directive`) + the **agent output stream** (`append_output`/
+`get_agent_output`, plus `POST /api/teams/{team}/agents/{agent}/output` for the hook).
+Workers run the `atmcp-worker` skill under `/loop`; "watching" is long-poll, so results
+surface in the console shell as soon as the worker reports.
 
 ## Making agents actually use it
 

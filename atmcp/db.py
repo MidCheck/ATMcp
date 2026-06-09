@@ -60,9 +60,28 @@ async def init(path: str | None = None) -> None:
     schema = _SCHEMA_PATH.read_text(encoding="utf-8")
     await _wconn.executescript(schema)
     await _wconn.commit()
+    await _migrate(_wconn)
 
     # Read connection shares the same DB file (WAL → concurrent reads).
     _rconn = await _open(db_path)
+
+
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Tiny forward migrations for pre-existing dev databases."""
+    cur = await conn.execute("PRAGMA table_info(idempotency)")
+    cols = [r[1] for r in await cur.fetchall()]
+    await cur.close()
+    if cols and "agent_id" not in cols:
+        # Idempotency rows are short-lived (pruned by the reaper); recreate with the
+        # agent-scoped primary key. Safe to drop.
+        await conn.execute("DROP TABLE idempotency")
+        await conn.execute(
+            "CREATE TABLE idempotency (team_id TEXT NOT NULL, agent_id TEXT NOT NULL, "
+            "idem_key TEXT NOT NULL, result_json TEXT NOT NULL, created_at INTEGER NOT NULL, "
+            "PRIMARY KEY (team_id, agent_id, idem_key))"
+        )
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_idem_created ON idempotency(created_at)")
+        await conn.commit()
 
 
 async def close() -> None:

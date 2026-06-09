@@ -40,6 +40,17 @@ async def test_set_memory_idempotent(team):
     assert got["version"] == 1  # only one write applied
 
 
+async def test_idem_key_is_scoped_per_agent(team):
+    # Two different agents reusing the SAME idem_key must NOT collide.
+    a = await join(team, "alice")
+    b = await join(team, "bob")
+    ra = await t.create_task(a, "alice's task", idem_key="shared")
+    rb = await t.create_task(b, "bob's task", idem_key="shared")
+    assert ra["task_id"] != rb["task_id"]
+    count = await db.fetchval("SELECT COUNT(*) FROM tasks WHERE team_id=?", (team["team_id"],))
+    assert count == 2
+
+
 async def test_claim_failure_result_is_cached(team):
     a = await join(team, "alice")
     b = await join(team, "bob")

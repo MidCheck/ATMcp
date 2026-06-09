@@ -13,8 +13,10 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from atmcp import hub, session
+from atmcp.services import directives as directives_svc
 from atmcp.services import identity as identity_svc
 from atmcp.services import knowledge as knowledge_svc
+from atmcp.services import output as output_svc
 from atmcp.services import memory as memory_svc
 from atmcp.services import presence as presence_svc
 from atmcp.services import status as status_svc
@@ -320,3 +322,115 @@ async def sync(
         if changed:
             res = await status_svc.sync(caller.team_id, since_event_id, limit)
     return res
+
+
+# ── directives (console → a specific agent) ─────────────────────────────────
+@mcp.tool()
+async def send_directive(
+    ctx: Context,
+    to_agent: str,
+    instruction: str,
+    payload: dict[str, Any] | None = None,
+    priority: int = 0,
+    idem_key: str | None = None,
+) -> dict[str, Any]:
+    """Send a command to ONE specific agent (by display_name or agent_id). The target picks
+    it up via `inbox` and reports back; use `wait_directive` to await the result."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.send_directive(caller, to_agent, instruction, payload, priority, idem_key)
+
+
+@mcp.tool()
+async def inbox(ctx: Context, wait_ms: int = 0, limit: int = 20, include_running: bool = False) -> dict[str, Any]:
+    """Your directive inbox: pending commands addressed to you. With `wait_ms` > 0 this
+    long-polls (up to 30s) until a directive arrives — ideal for a worker loop."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.inbox(caller, wait_ms, limit, include_running)
+
+
+@mcp.tool()
+async def claim_directive(ctx: Context, directive_id: str) -> dict[str, Any]:
+    """Mark a directive addressed to you as 'running' before you start executing it."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.claim_directive(caller, directive_id)
+
+
+@mcp.tool()
+async def report_directive(
+    ctx: Context,
+    directive_id: str,
+    status: str,
+    result_summary: str | None = None,
+    output: str | None = None,
+    idem_key: str | None = None,
+) -> dict[str, Any]:
+    """Report a directive finished: status must be 'done' or 'failed'. The issuer's
+    `wait_directive` unblocks with your `result_summary` / `output`."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.report_directive(caller, directive_id, status, result_summary, output, idem_key)
+
+
+@mcp.tool()
+async def wait_directive(ctx: Context, directive_id: str, wait_ms: int = 0) -> dict[str, Any]:
+    """Await a directive you sent. With `wait_ms` > 0, long-polls until it reaches a terminal
+    state (done/failed/canceled). Returns the directive incl. result_summary/result_output."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.wait_directive(caller, directive_id, wait_ms)
+
+
+@mcp.tool()
+async def cancel_directive(ctx: Context, directive_id: str) -> dict[str, Any]:
+    """Cancel a directive you issued (only if it hasn't finished)."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await directives_svc.cancel_directive(caller, directive_id)
+
+
+@mcp.tool()
+async def list_directives(
+    ctx: Context, role: str | None = None, status: str | None = None, limit: int = 50
+) -> dict[str, Any]:
+    """List directives. role='sent' (issued by you), 'received' (addressed to you), or omit
+    for the whole team; optionally filter by status."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    items = await directives_svc.list_directives(caller, role, status, limit)
+    return {"ok": True, "count": len(items), "directives": items}
+
+
+# ── agent output stream (view what an agent is printing) ────────────────────
+@mcp.tool()
+async def append_output(ctx: Context, text: str, directive_id: str | None = None) -> dict[str, Any]:
+    """Stream a chunk of YOUR output/progress so the console can watch it live (optionally
+    tagged with the directive_id you're working on)."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    return await output_svc.append_output(caller.team_id, caller.agent_id, text, directive_id, source="agent")
+
+
+@mcp.tool()
+async def get_agent_output(
+    ctx: Context, agent: str, since_seq: int = 0, wait_ms: int = 0, limit: int = 200
+) -> dict[str, Any]:
+    """Tail another agent's output (by display_name or agent_id) from `since_seq`. With
+    `wait_ms` > 0, long-polls for the next chunk. Returns chunks + `head_seq` to continue."""
+    caller, err = await _resolve(ctx)
+    if err:
+        return err
+    agent_id = await identity_svc.resolve_agent_ref(caller.team_id, agent)
+    if agent_id is None:
+        return {"ok": False, "error": "unknown_agent", "agent": agent}
+    return await output_svc.get_output(caller.team_id, agent_id, since_seq, wait_ms, limit)

@@ -46,5 +46,9 @@ class Settings:
     stream_maxlen: int = _int("ATMCP_STREAM_MAXLEN", 1000)
     dashboard_auth: bool = _bool("ATMCP_DASHBOARD_AUTH", False)
 
+    # Inter-agent output stream (for "view another agent's output")
+    output_retention_s: int = _int("ATMCP_OUTPUT_RETENTION_S", 7200)  # prune older chunks
+    output_max_chunk: int = _int("ATMCP_OUTPUT_MAX_CHUNK", 8192)      # truncate huge chunks
+
 
 settings = Settings()

@@ -92,6 +92,17 @@ async def publish_presence(team: str, frame: dict[str, Any]) -> None:
     await _broadcast(team, {"type": "presence", **frame})
 
 
+async def tick(team: str, frame: dict[str, Any] | None = None) -> None:
+    """Advance the team generation (wake long-poll waiters) without writing an event row.
+    Used by high-frequency streams like agent output. Optionally broadcasts a WS frame."""
+    if frame is not None:
+        await _broadcast(team, frame)
+    c = _cond(team)
+    async with c:
+        _gen[team] = _gen.get(team, 0) + 1
+        c.notify_all()
+
+
 async def wait_for_change(team: str, since_gen: int, timeout_s: float) -> bool:
     """Block until the team's generation advances past since_gen (or timeout)."""
     c = _cond(team)

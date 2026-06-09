@@ -16,20 +16,21 @@ from atmcp.db import Tx
 from atmcp.ids import now_ms
 
 
-async def check(tx: Tx, team_id: str, idem_key: str) -> dict[str, Any] | None:
+async def check(tx: Tx, team_id: str, agent_id: str, idem_key: str) -> dict[str, Any] | None:
     row = await tx.fetchone(
-        "SELECT result_json FROM idempotency WHERE team_id=? AND idem_key=?",
-        (team_id, idem_key),
+        "SELECT result_json FROM idempotency WHERE team_id=? AND agent_id=? AND idem_key=?",
+        (team_id, agent_id, idem_key),
     )
     return json.loads(row["result_json"]) if row is not None else None
 
 
-async def store(tx: Tx, team_id: str, idem_key: str, result: dict[str, Any]) -> None:
+async def store(tx: Tx, team_id: str, agent_id: str, idem_key: str, result: dict[str, Any]) -> None:
+    # Keys are scoped to the caller (agent_id) so two agents can't collide on an idem_key.
     # OR IGNORE: first writer wins; a racing duplicate keeps the original result.
     await tx.execute(
-        "INSERT OR IGNORE INTO idempotency(team_id, idem_key, result_json, created_at) "
-        "VALUES(?,?,?,?)",
-        (team_id, idem_key, json.dumps(result), now_ms()),
+        "INSERT OR IGNORE INTO idempotency(team_id, agent_id, idem_key, result_json, created_at) "
+        "VALUES(?,?,?,?,?)",
+        (team_id, agent_id, idem_key, json.dumps(result), now_ms()),
     )
 
 

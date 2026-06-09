@@ -26,6 +26,11 @@ TASK_COMPLETED = "task_completed"
 TASK_FAILED = "task_failed"
 TASK_REQUEUED = "task_requeued"
 TASK_RELEASED = "task_released"
+DIRECTIVE_SENT = "directive_sent"
+DIRECTIVE_CLAIMED = "directive_claimed"
+DIRECTIVE_DONE = "directive_done"
+DIRECTIVE_FAILED = "directive_failed"
+DIRECTIVE_CANCELED = "directive_canceled"
 
 
 async def append(

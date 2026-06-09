@@ -34,7 +34,7 @@ async def post_knowledge(
 
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         await tx.execute(
@@ -88,7 +88,7 @@ async def post_knowledge(
             "contributor_count": int(ccount),
         }
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     return result
 
 
@@ -159,7 +159,7 @@ async def retract_knowledge(
     now = now_ms()
     async with db.transaction() as tx:
         if idem_key:
-            prior = await idempotency.check(tx, team_id, idem_key)
+            prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
         existing = await tx.fetchone(
@@ -181,5 +181,5 @@ async def retract_knowledge(
         )
         result = {"ok": True, "content_id": content_id_, "event_id": eid}
         if idem_key:
-            await idempotency.store(tx, team_id, idem_key, result)
+            await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     return result

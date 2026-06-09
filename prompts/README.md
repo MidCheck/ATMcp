@@ -26,6 +26,13 @@ Adding the MCP server only makes the tools *available*. Agents (Claude Code, Cur
 | Cursor | `.cursor/mcp.json` (see [cursor.md](cursor.md)) | `.cursor/rules/atmcp.mdc` |
 | Qwen / other | MCP config + system prompt (see [qwen.md](qwen.md)) | system prompt |
 
+## Manage the team from one window (console + workers)
+
+To command the team from a single interactive window — list status/TODOs, send a directive to
+a specific agent, watch its result, tail another agent's output — see
+**[console-worker.md](console-worker.md)** and install the **[`../skills/`](../skills)**
+(`/team` console + `/atmcp-worker` loop).
+
 ## Three ways to keep presence fresh (pick one)
 
 - **A — let the model do it:** rely on step 2's prompt (`heartbeat` at each step). Zero
