@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    # Soft state only: no persistence, never evict (we want leases/heartbeats to
+    # expire by TTL, not be dropped under memory pressure).
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  atmcp:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      ATMCP_REDIS_URL: "redis://redis:6379/0"
+      ATMCP_SQLITE_PATH: "/data/atmcp.db"
+      ATMCP_ADMIN_TOKEN: "${ATMCP_ADMIN_TOKEN:-change-me-admin-token}"
+      ATMCP_PUBLIC_URL: "${ATMCP_PUBLIC_URL:-http://localhost:8000}"
+      ATMCP_DASHBOARD_AUTH: "${ATMCP_DASHBOARD_AUTH:-0}"
+    volumes:
+      - atmcp_data:/data        # SQLite durability — this is the thing to back up
+    ports:
+      - "8000:8000"
+
+  # Optional TLS terminator for remote agents over HTTPS.
+  # Uncomment and provide a Caddyfile with: your.domain { reverse_proxy atmcp:8000 }
+  # caddy:
+  #   image: caddy:2-alpine
+  #   depends_on: [atmcp]
+  #   ports: ["443:443", "80:80"]
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile
+  #     - caddy_data:/data
+
+volumes:
+  atmcp_data:
+  # caddy_data:

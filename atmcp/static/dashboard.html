@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ATMcp — Team Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --panel2: #1c2330; --border: #2a3340;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --green: #3fb950; --amber: #d29922; --grey: #6e7681; --red: #f85149;
+      --blue: #388bfd; --purple: #bc8cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    header {
+      display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+      background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header .team { color: var(--accent); }
+    .pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel2); color: var(--muted); border: 1px solid var(--border); }
+    #conn.live { color: var(--green); border-color: var(--green); }
+    #conn.down { color: var(--red); border-color: var(--red); }
+    .grid { display: grid; grid-template-columns: 1.4fr 1.6fr 1fr; gap: 14px; padding: 14px; align-items: start; }
+    @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+    .goalbar { height: 10px; background: var(--panel2); border-radius: 6px; overflow: hidden; margin: 6px 0 4px; }
+    .goalbar > div { height: 100%; background: linear-gradient(90deg, var(--blue), var(--green)); transition: width .4s; }
+    .stat-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+    .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; min-width: 78px; }
+    .stat b { font-size: 18px; display: block; }
+    .stat span { color: var(--muted); font-size: 11px; }
+
+    .agent { display: flex; align-items: center; gap: 10px; padding: 9px 6px; border-bottom: 1px solid var(--border); }
+    .agent:last-child { border-bottom: none; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+    .dot.healthy { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.degraded { background: var(--amber); }
+    .dot.offline { background: var(--grey); }
+    .agent .meta { flex: 1; min-width: 0; }
+    .agent .name { font-weight: 600; }
+    .agent .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mini { height: 6px; background: var(--panel2); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+    .mini > div { height: 100%; background: var(--accent); }
+
+    .cols { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .col h3 { font-size: 11px; color: var(--muted); margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+    .task { background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--grey); border-radius: 6px; padding: 7px 8px; margin-bottom: 6px; }
+    .task.open { border-left-color: var(--grey); }
+    .task.claimed { border-left-color: var(--blue); }
+    .task.in_progress { border-left-color: var(--accent); }
+    .task.blocked { border-left-color: var(--amber); }
+    .task.done { border-left-color: var(--green); opacity: .75; }
+    .task.failed { border-left-color: var(--red); }
+    .task .t { font-weight: 500; font-size: 13px; }
+    .task .a { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+    .feed { max-height: 380px; overflow-y: auto; }
+    .ev { display: flex; gap: 8px; padding: 5px 2px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+    .ev .k { color: var(--purple); flex: none; }
+    .ev .who { color: var(--muted); }
+    .know { padding: 7px 2px; border-bottom: 1px solid var(--border); }
+    .know:last-child { border: none; }
+    .know .tags { color: var(--accent); font-size: 11px; }
+    .know .by { color: var(--muted); font-size: 11px; }
+    .empty { color: var(--muted); font-style: italic; padding: 8px 2px; }
+    code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .setup { padding: 40px; max-width: 680px; margin: 0 auto; }
+    .setup input { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; width: 260px; }
+    .setup button { background: var(--accent); color: #04101f; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="setup" class="setup" style="display:none">
+    <h1>ATMcp Dashboard</h1>
+    <p class="muted">Enter a team name to watch its agents live.</p>
+    <p><input id="teamInput" placeholder="team name" /> <button onclick="goTeam()">Open</button></p>
+  </div>
+
+  <div id="app" style="display:none">
+    <header>
+      <h1>ATMcp · <span class="team" id="teamName"></span></h1>
+      <span class="pill" id="conn">connecting…</span>
+      <span class="pill" id="agentsOnline">0 online</span>
+      <span class="pill" id="headCursor">#0</span>
+      <span style="flex:1"></span>
+      <span class="pill">MCP: <code id="mcpUrl">/mcp</code></span>
+    </header>
+
+    <div class="grid">
+      <div>
+        <div class="panel">
+          <h2>Goal progress</h2>
+          <div class="goalbar"><div id="goalFill" style="width:0%"></div></div>
+          <div><b id="goalPct">0%</b> <span class="muted" id="goalDetail"></span></div>
+          <div class="stat-row" id="statRow"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>Agents</h2>
+          <div id="agents"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Task board</h2>
+        <div class="cols" id="board"></div>
+      </div>
+
+      <div>
+        <div class="panel">
+          <h2>Activity</h2>
+          <div class="feed" id="feed"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>Knowledge</h2>
+          <div id="knowledge"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
