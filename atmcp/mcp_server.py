@@ -13,6 +13,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from atmcp import hub, session
+from atmcp.mcp_transport import build_mcp_transport_security
 from atmcp.services import directives as directives_svc
 from atmcp.services import identity as identity_svc
 from atmcp.services import knowledge as knowledge_svc
@@ -31,7 +32,12 @@ with `set_memory`/`get_memory`, and coordinate work with `create_task`, `claim_n
 to see the team, and `sync(since_event_id, wait_ms)` to catch up on what changed.
 """
 
-mcp = FastMCP("ATMcp", instructions=INSTRUCTIONS, streamable_http_path="/")
+mcp = FastMCP(
+    "ATMcp",
+    instructions=INSTRUCTIONS,
+    streamable_http_path="/",
+    transport_security=build_mcp_transport_security(),
+)
 
 
 async def _resolve(ctx: Context) -> tuple[session.Caller | None, dict[str, Any] | None]:
