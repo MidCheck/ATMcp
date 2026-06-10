@@ -83,3 +83,39 @@ async def test_rest_heartbeat_creates_and_shows_agent(client):
             headers={"Authorization": "Bearer nope"},
         )
         assert r.status_code == 401
+
+
+async def test_console_command_and_agent_detail(client):
+    async with client as c:
+        team = (await c.post(
+            "/api/teams", json={"name": "con"},
+            headers={"X-Admin-Token": settings.admin_token},
+        )).json()
+        jt = team["join_token"]
+        # register a worker (REST heartbeat) so it's addressable
+        await c.post("/api/teams/con/heartbeat", json={"display_name": "bob"},
+                     headers={"Authorization": f"Bearer {jt}"})
+
+        # console command without a token → 401
+        assert (await c.post("/api/teams/con/console/command", json={"command": "status"})).status_code == 401
+
+        # send a directive via the console (token in body)
+        r = await c.post("/api/teams/con/console/command",
+                         json={"command": "send bob fix the parser", "token": jt})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] and body["kind"] == "send"
+        did = body["data"]["directive_id"]
+
+        # team-wide directives list
+        r = await c.get("/api/teams/con/directives")
+        assert r.status_code == 200 and r.json()["count"] >= 1
+        # filtering by an unknown agent must 404 (not silently return everything)
+        assert (await c.get("/api/teams/con/directives?agent=ghost")).status_code == 404
+
+        # agent detail shows the directive addressed to bob
+        r = await c.get("/api/teams/con/agents/bob/detail")
+        assert r.status_code == 200
+        det = r.json()
+        assert any(x["directive_id"] == did for x in det["directives"])
+        assert det["agent"]["display_name"] == "bob"

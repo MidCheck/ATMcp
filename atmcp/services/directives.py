@@ -229,6 +229,28 @@ async def cancel_directive(caller: Caller, directive_id: str) -> dict[str, Any]:
     return {"ok": True, "directive_id": directive_id}
 
 
+async def list_team(
+    team_id: str, status: str | None = None, to_agent: str | None = None, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Team-wide directive list (for the dashboard, not scoped to a caller's role)."""
+    clauses = ["team_id=?"]
+    params: list[Any] = [team_id]
+    if status:
+        clauses.append("status=?")
+        params.append(status)
+    if to_agent:
+        clauses.append("to_agent=?")
+        params.append(to_agent)
+    params.append(max(1, min(int(limit or 100), 300)))
+    rows = await db.fetchall(
+        "SELECT directive_id,from_agent,to_agent,instruction,status,priority,result_summary,"
+        f"created_at,updated_at FROM directives WHERE {' AND '.join(clauses)} "
+        "ORDER BY created_at DESC LIMIT ?",
+        params,
+    )
+    return [_row(r) for r in rows]
+
+
 async def list_directives(
     caller: Caller, role: str | None = None, status: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:

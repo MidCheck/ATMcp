@@ -101,7 +101,10 @@ If your client can't set headers, the agent passes the token to `join_team` dire
 Open `http://<host>/dashboard?team=<team>` — agent cards with live presence (green/amber/grey),
 the task board, the weighted goal-progress bar, a live activity feed, and the knowledge panel.
 It loads a JSON snapshot then live-updates over a WebSocket (auto-reconnects with catch-up).
-Auth is **off by default**; set `ATMCP_DASHBOARD_AUTH=1` to require a per-team read-only token.
+**Click an agent** to drill into its directives, tasks, and live output; use the bottom
+**console box** to type `/team` commands (a "pseudo-model" chat) — results and live events
+stream into the conversation. Auth is **off by default**; set `ATMCP_DASHBOARD_AUTH=1` to
+require a per-team read-only token (the console box always needs the join token to send commands).
 
 ## MCP tools
 
@@ -165,8 +168,9 @@ atmcp/
                     · directives (console→agent commands) · output (agent output stream)
   static/           dashboard.html + dashboard.js
 prompts/            ready-to-paste agent rules + console/worker setup
-scripts/            atmcp_heartbeat.py (presence sidecar) · atmcp_output_hook.py
+scripts/            atmcp_heartbeat.py · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
 skills/             team (console) + atmcp-worker (worker loop) Claude Code skills
+agents/             atmcp-executor (Opus subagent the worker delegates execution to)
 ```
 
 ## Team console — manage the whole team from one window
@@ -186,8 +190,14 @@ and the **[`skills/`](skills/)** (`/team` console + `/atmcp-worker` loop).
 Server-side this is the **directive bus** (`send_directive`/`inbox`/`claim_directive`/
 `report_directive`/`wait_directive`) + the **agent output stream** (`append_output`/
 `get_agent_output`, plus `POST /api/teams/{team}/agents/{agent}/output` for the hook).
-Workers run the `atmcp-worker` skill under `/loop`; "watching" is long-poll, so results
-surface in the console shell as soon as the worker reports.
+"Watching" is long-poll, so results surface as soon as the worker reports.
+
+**Run workers reliably.** Don't use bare `/loop /atmcp-worker` (dynamic mode relies on the
+model re-arming each turn and can silently stop, esp. on Windows PowerShell). Use the
+**runner script** (`scripts/atmcp_worker_runner.{sh,ps1}`) which re-invokes Claude Code
+headless each tick — and runs the **poller on a fast model** (`--model haiku`) while delegating
+the actual instruction to the **Opus `atmcp-executor` subagent** (`agents/atmcp-executor.md`).
+Cheap polling, strong execution. (Or `/loop 30s /atmcp-worker` with an explicit interval.)
 
 ## Making agents actually use it
 

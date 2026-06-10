@@ -27,7 +27,8 @@
     #conn.down { color: var(--red); border-color: var(--red); }
     .grid { display: grid; grid-template-columns: 1.4fr 1.6fr 1fr; gap: 14px; padding: 14px; align-items: start; }
     @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
-    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin: 0 14px 14px; }
+    .grid .panel { margin: 0; }
     .panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
     .goalbar { height: 10px; background: var(--panel2); border-radius: 6px; overflow: hidden; margin: 6px 0 4px; }
     .goalbar > div { height: 100%; background: linear-gradient(90deg, var(--blue), var(--green)); transition: width .4s; }
@@ -36,7 +37,9 @@
     .stat b { font-size: 18px; display: block; }
     .stat span { color: var(--muted); font-size: 11px; }
 
-    .agent { display: flex; align-items: center; gap: 10px; padding: 9px 6px; border-bottom: 1px solid var(--border); }
+    .agent { display: flex; align-items: center; gap: 10px; padding: 9px 6px; border-bottom: 1px solid var(--border); cursor: pointer; border-radius: 6px; }
+    .agent:hover { background: var(--panel2); }
+    .agent.sel { background: var(--panel2); outline: 1px solid var(--accent); }
     .agent:last-child { border-bottom: none; }
     .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
     .dot.healthy { background: var(--green); box-shadow: 0 0 6px var(--green); }
@@ -72,7 +75,37 @@
     code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
     .setup { padding: 40px; max-width: 680px; margin: 0 auto; }
     .setup input { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; width: 260px; }
-    .setup button { background: var(--accent); color: #04101f; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    .setup button, .console button, .token-row button { background: var(--accent); color: #04101f; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+
+    /* Agent detail panel */
+    .detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .detail-head h2 { margin: 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); }
+    .detail-head button { margin-left: auto; background: var(--panel2); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+    .detail-cols { display: grid; grid-template-columns: 1fr 1.2fr; gap: 14px; }
+    @media (max-width: 900px) { .detail-cols { grid-template-columns: 1fr; } }
+    .detail-cols h3 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 6px; }
+    .drow { padding: 6px 2px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+    .drow:last-child { border: none; }
+    .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .badge.pending { color: var(--grey); } .badge.running { color: var(--accent); border-color: var(--accent); }
+    .badge.done { color: var(--green); } .badge.failed { color: var(--red); } .badge.canceled { color: var(--grey); }
+    .outlog { background: #0a0e14; border: 1px solid var(--border); border-radius: 8px; padding: 10px; height: 280px; overflow-y: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; color: #c9d6e3; margin: 0; }
+    .outlog .src-hook { color: var(--purple); }
+
+    /* Console (pseudo-model chat) */
+    .console h2 .muted { text-transform: none; letter-spacing: 0; }
+    .conv { height: 240px; overflow-y: auto; background: #0a0e14; border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+    .msg { margin: 6px 0; }
+    .msg .role { font-size: 11px; color: var(--muted); }
+    .msg.you .body { color: var(--accent); }
+    .msg.team .body { white-space: pre-wrap; }
+    .msg.evt .body { color: var(--purple); font-size: 12.5px; }
+    .msg.err .body { color: var(--red); }
+    .console-input { display: flex; gap: 8px; }
+    .console-input input { flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 9px 12px; border-radius: 8px; font: inherit; }
+    .token-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .token-row input { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; width: 320px; }
+    .token-row .muted { font-size: 12px; }
   </style>
 </head>
 <body>
@@ -94,32 +127,68 @@
 
     <div class="grid">
       <div>
-        <div class="panel">
+        <div class="panel" style="margin:0">
           <h2>Goal progress</h2>
           <div class="goalbar"><div id="goalFill" style="width:0%"></div></div>
           <div><b id="goalPct">0%</b> <span class="muted" id="goalDetail"></span></div>
           <div class="stat-row" id="statRow"></div>
         </div>
-        <div class="panel" style="margin-top:14px">
-          <h2>Agents</h2>
+        <div class="panel" style="margin:14px 0 0">
+          <h2>Agents <span class="muted" style="text-transform:none">— click to inspect</span></h2>
           <div id="agents"></div>
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel" style="margin:0">
         <h2>Task board</h2>
         <div class="cols" id="board"></div>
       </div>
 
       <div>
-        <div class="panel">
+        <div class="panel" style="margin:0">
           <h2>Activity</h2>
           <div class="feed" id="feed"></div>
         </div>
-        <div class="panel" style="margin-top:14px">
+        <div class="panel" style="margin:14px 0 0">
           <h2>Knowledge</h2>
           <div id="knowledge"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- Agent detail (opens on click) -->
+    <div class="panel detail" id="detail" style="display:none">
+      <div class="detail-head">
+        <h2 id="detailName"></h2>
+        <span class="pill" id="detailPresence"></span>
+        <button onclick="closeDetail()">close ✕</button>
+      </div>
+      <div class="detail-cols">
+        <div>
+          <h3>Directives</h3>
+          <div id="detailDirectives"></div>
+          <h3 style="margin-top:12px">Tasks</h3>
+          <div id="detailTasks"></div>
+        </div>
+        <div>
+          <h3>Live output</h3>
+          <pre id="detailOutput" class="outlog"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Team console (pseudo-model chat) -->
+    <div class="panel console">
+      <h2>Team console <span class="muted">— type /team commands (try <code>help</code>)</span></h2>
+      <div class="conv" id="conv"></div>
+      <div class="console-input">
+        <input id="cmdInput" placeholder='/team status   ·   send bob "fix the parser"   ·   logs bob   (Enter to run)' autocomplete="off" />
+        <button onclick="runConsole()">send</button>
+      </div>
+      <div class="token-row">
+        <input id="tokenInput" type="password" placeholder="join token (required to send commands)" />
+        <button onclick="saveToken()">save token</button>
+        <span class="muted" id="tokenState"></span>
       </div>
     </div>
   </div>

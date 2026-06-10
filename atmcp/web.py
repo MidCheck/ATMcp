@@ -17,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from atmcp import db, hub, redis_bus
 from atmcp.config import settings
 from atmcp.ids import hash_token, token_matches
+from atmcp.services import console as console_svc
+from atmcp.services import directives as directives_svc
 from atmcp.services import identity as identity_svc
 from atmcp.services import output as output_svc
 from atmcp.services import presence as presence_svc
@@ -146,6 +148,78 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="unknown team")
         _check_dashboard(team, token)
         return await status_svc.get_team_status(team["team_id"])
+
+    # ── dashboard console + agent drill-down ───────────────────────────────
+    @app.post("/api/teams/{team_name}/console/command")
+    async def console_command(
+        team_name: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Run a /team command from the dashboard console box. Auth = the join token
+        (write-capable; the dashboard sends it in a header or the body)."""
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        token = _bearer(authorization) or x_atmcp_token or (body or {}).get("token")
+        join_hash = await db.fetchval(
+            "SELECT join_token_hash FROM teams WHERE team_id=?", (team["team_id"],)
+        )
+        if not token or not join_hash or not token_matches(token, join_hash):
+            raise HTTPException(status_code=401, detail="invalid join token")
+        return await console_svc.run_command(
+            team["team_id"], (body or {}).get("console") or "dashboard", (body or {}).get("command", "")
+        )
+
+    @app.get("/api/teams/{team_name}/directives")
+    async def list_team_directives(
+        team_name: str, status: str | None = None, agent: str | None = None,
+        limit: int = 100, token: str | None = None,
+    ) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        to_agent = None
+        if agent:
+            to_agent = await identity_svc.resolve_agent_ref(team["team_id"], agent)
+            if to_agent is None:
+                raise HTTPException(status_code=404, detail="unknown agent")
+        items = await directives_svc.list_team(team["team_id"], status, to_agent, limit)
+        return {"directives": items, "count": len(items)}
+
+    @app.get("/api/teams/{team_name}/agents/{agent_ref}/detail")
+    async def agent_detail(team_name: str, agent_ref: str, token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent_ref)
+        if aid is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        agents = await identity_svc.list_agents(team["team_id"])
+        me = next((a for a in agents if a["agent_id"] == aid), None)
+        directives = await directives_svc.list_team(team["team_id"], to_agent=aid, limit=50)
+        tasks = await tasks_svc.list_tasks(team["team_id"], assignee=aid, limit=100)
+        out = await output_svc.get_output(team["team_id"], aid, 0, 0, 300)
+        return {
+            "agent": me, "agent_id": aid, "directives": directives, "tasks": tasks,
+            "output": out["chunks"], "head_seq": out["head_seq"],
+        }
+
+    @app.get("/api/teams/{team_name}/agents/{agent_ref}/output")
+    async def agent_output_get(
+        team_name: str, agent_ref: str, since_seq: int = 0, limit: int = 200, token: str | None = None
+    ) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent_ref)
+        if aid is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        return await output_svc.get_output(team["team_id"], aid, since_seq, 0, limit)
 
     @app.post("/api/teams/{team_name}/heartbeat")
     async def rest_heartbeat(

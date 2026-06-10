@@ -12,16 +12,15 @@ agent shell at a time".
         output   ◄── get_agent_output ◄────── agent_output ◄ append_output / hook
 ```
 
-## 1. Install the skills
-
-Copy the skill folders into your Claude Code skills directory (user- or project-level):
+## 1. Install the skills + executor subagent
 
 ```bash
-cp -r skills/team skills/atmcp-worker ~/.claude/skills/     # user-level
-# or into  .claude/skills/  inside a project
+cp -r skills/team skills/atmcp-worker ~/.claude/skills/   # console + worker skills
+cp agents/atmcp-executor.md ~/.claude/agents/             # Opus executor subagent
+# (or the project-level .claude/skills and .claude/agents)
 ```
 
-## 2. Start a worker (one per agent, kept on a loop)
+## 2. Start a worker (one per agent, kept running reliably)
 
 Configure the worker's MCP client with the team headers (auto-join + an addressable name):
 
@@ -31,11 +30,19 @@ claude mcp add --transport http atmcp http://<host>:8000/mcp \
   --header "X-ATMcp-Agent: bob"
 ```
 
-Then keep it available so the console can reach it:
+Keep it available with the **runner script** (recommended — survives any turn ending/crash,
+runs the poller on a fast model and delegates heavy work to the Opus executor subagent):
 
+```bash
+ATMCP_MODEL=haiku ./scripts/atmcp_worker_runner.sh        # macOS/Linux
+# Windows PowerShell:  $env:ATMCP_MODEL="haiku"; ./scripts/atmcp_worker_runner.ps1
 ```
-/loop /atmcp-worker
-```
+
+> In-app alternative: `/loop 30s /atmcp-worker` (use an **explicit interval**). Avoid bare
+> `/loop /atmcp-worker` — dynamic self-paced mode relies on the model re-arming each turn and
+> can silently stop after a while (especially on Windows PowerShell). The runner script avoids
+> this entirely. The **two-model split** (cheap poller + Opus `atmcp-executor` subagent) keeps
+> polling cheap while the actual instruction is executed with full reasoning.
 
 Optional but recommended — stable presence + real terminal-output capture:
 

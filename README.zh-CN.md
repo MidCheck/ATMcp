@@ -128,15 +128,23 @@ MCP 是**拉,不是推**:工具是"可用"的,但模型自己决定何时调用,
 
 服务端是**指令总线**(`send_directive`/`inbox`/`claim_directive`/`report_directive`/
 `wait_directive`)+ **Agent 输出流**(`append_output`/`get_agent_output`,以及给 hook 用的
-`POST /api/teams/{team}/agents/{agent}/output`)。worker 用 `atmcp-worker` 技能配 `/loop` 常驻;
-"watch/通知"靠长轮询实现 —— worker 一上报,结果立刻出现在你的 console shell 里。详见
+`POST /api/teams/{team}/agents/{agent}/output`)。"watch/通知"靠长轮询实现 —— worker 一上报,
+结果立刻出现在对话里。
+
+**可靠地跑 worker**:不要用裸 `/loop /atmcp-worker`(动态模式依赖模型每回合重新排程,跑一段时间会
+悄悄停掉,Windows PowerShell 尤其明显)。改用**运行脚本** `scripts/atmcp_worker_runner.{sh,ps1}`:
+它每个 tick 以 headless 方式重新拉起 Claude Code,且**轮询用轻量模型**(`--model haiku`),把真正的
+指令执行**委派给 Opus 的 `atmcp-executor` 子 agent**(`agents/atmcp-executor.md`)—— 轮询便宜、执行
+够强。(或用 `/loop 30s /atmcp-worker`,带显式间隔。)详见
 **[`prompts/console-worker.md`](prompts/console-worker.md)** 与 **[`skills/`](skills/)**。
 
 ## 网页看板
 
 打开 `http://<host>:8000/dashboard?team=<队名>` —— Agent 卡片(绿/黄/灰 实时在线徽标)、任务看板、
 按权重的目标进度条、实时活动流、知识面板。页面先拉一次 JSON 快照,再通过 WebSocket 实时增量更新
-(断线自动重连并补帧)。鉴权**默认关闭**;设 `ATMCP_DASHBOARD_AUTH=1` 可要求每团队一个只读令牌。
+(断线自动重连并补帧)。**点击某个 agent** 可下钻查看它的指令、任务与实时输出;底部的**控制台输入框**
+可输入 `/team` 命令(伪模型对话),命令结果与实时事件流入上方对话区。鉴权**默认关闭**;设
+`ATMCP_DASHBOARD_AUTH=1` 可要求每团队一个只读令牌(控制台发指令始终需要 join token)。
 
 ## MCP 工具
 
@@ -200,8 +208,9 @@ atmcp/
                     · directives(console→agent 指令)· output(agent 输出流)
   static/           dashboard.html + dashboard.js
 prompts/            现成的 Agent 规则 + console/worker 配置说明
-scripts/            atmcp_heartbeat.py(在线 sidecar)· atmcp_output_hook.py(输出 hook)
+scripts/            atmcp_heartbeat.py · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
 skills/             team(控制台)+ atmcp-worker(worker 循环)Claude Code 技能
+agents/             atmcp-executor(worker 委派执行用的 Opus 子 agent)
 ```
 
 ## 许可
