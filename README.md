@@ -98,13 +98,17 @@ If your client can't set headers, the agent passes the token to `join_team` dire
 
 ## Dashboard
 
-Open `http://<host>/dashboard?team=<team>` — agent cards with live presence (green/amber/grey),
-the task board, the weighted goal-progress bar, a live activity feed, and the knowledge panel.
+Open `http://<host>/dashboard?team=<team>` — a full-height **three-column** app (no page
+scrolling; each column scrolls on its own):
+- **Left:** goal progress + stats and the live agent roster (presence green/amber/grey).
+- **Center (tabbed):** Task board · Activity feed · Knowledge — and **clicking an agent** opens
+  an **Agent** tab right there with its directives, tasks, and live output (no scrolling down).
+- **Right (always visible):** the **Team console** — type `/team` commands (a "pseudo-model"
+  chat) with the input pinned at the bottom; results and live directive events stream in.
+
 It loads a JSON snapshot then live-updates over a WebSocket (auto-reconnects with catch-up).
-**Click an agent** to drill into its directives, tasks, and live output; use the bottom
-**console box** to type `/team` commands (a "pseudo-model" chat) — results and live events
-stream into the conversation. Auth is **off by default**; set `ATMCP_DASHBOARD_AUTH=1` to
-require a per-team read-only token (the console box always needs the join token to send commands).
+Auth is **off by default**; set `ATMCP_DASHBOARD_AUTH=1` to require a per-team read-only token
+(the console always needs the join token to send commands).
 
 ## MCP tools
 

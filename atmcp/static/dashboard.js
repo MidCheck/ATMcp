@@ -129,25 +129,38 @@ function prependEvent(e) {
   while (feed.childNodes.length > 100) feed.removeChild(feed.lastChild);
 }
 
-// ── Agent detail ────────────────────────────────────────────────────────────
+// ── Center tabs ──────────────────────────────────────────────────────────────
+const TABS = ["board", "activity", "knowledge", "detail"];
+function showTab(name) {
+  TABS.forEach((t) => {
+    const panel = el("tab-" + t);
+    const btn = el("tabbtn-" + t);
+    if (panel) panel.style.display = t === name ? "" : "none";
+    if (btn) btn.classList.toggle("active", t === name);
+  });
+}
+window.showTab = showTab;
+
+// ── Agent detail (opens in the center "Agent" tab) ───────────────────────────
 async function openDetail(agentId, name) {
   selAgent = { id: agentId, name };
-  el("detail").style.display = "block";
   el("detailName").textContent = name;
   document.querySelectorAll(".agent").forEach((c) =>
     c.classList.toggle("sel", c.dataset.agentId === agentId));
+  el("tabbtn-detail").style.display = "";
+  showTab("detail");
   try {
     const r = await fetch(withToken(`/api/teams/${encodeURIComponent(TEAM)}/agents/${encodeURIComponent(agentId)}/detail`));
     if (r.ok) renderDetail(await r.json());
   } catch (e) {}
-  el("detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 window.openDetail = openDetail;
 
 function closeDetail() {
   selAgent = null;
-  el("detail").style.display = "none";
+  el("tabbtn-detail").style.display = "none";
   document.querySelectorAll(".agent").forEach((c) => c.classList.remove("sel"));
+  showTab("board");
 }
 window.closeDetail = closeDetail;
 
@@ -283,7 +296,7 @@ function connectWS() {
 
 function start() {
   if (!TEAM) { el("setup").style.display = "block"; return; }
-  el("app").style.display = "block";
+  el("app").style.display = "flex";
   el("teamName").textContent = TEAM;
   loadToken();
   el("agents").addEventListener("click", (e) => {
