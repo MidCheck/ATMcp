@@ -20,29 +20,45 @@ cp agents/atmcp-executor.md ~/.claude/agents/             # Opus executor subage
 # (or the project-level .claude/skills and .claude/agents)
 ```
 
-## 2. Start a worker (one per agent, kept running reliably)
+## 2. Start a worker — pick a mode
 
-Configure the worker's MCP client with the team headers (auto-join + an addressable name):
+### Mode A — token-efficient poller (recommended)
+
+A plain script long-polls the inbox over HTTP and invokes a model **only when there is actual
+work**, so idle time costs **zero tokens**. (An in-agent loop instead pays a full model turn —
+system prompt + ~33 MCP tool schemas — on *every* poll just to discover an empty inbox; that
+adds up to millions of wasted tokens a day.)
+
+```bash
+python scripts/atmcp_worker_poller.py \
+  --url http://<host>:8000 --team <team> --token <join_token> --name bob --model opus
+```
+
+The poller heartbeats (presence + registers the name), long-polls the inbox, and on a directive
+it claims → runs `claude -p --model <model> "<instruction>"` → reports the result and streams
+output. The executor model runs **per directive only**. `--dry-run` tests the loop without
+calling the model. Needs the `claude` CLI on PATH with the atmcp MCP server configured (so the
+executor can use team tools when a directive needs them).
+
+### Mode B — in-agent loop (simpler, but pays tokens per poll)
+
+Run the `atmcp-worker` skill as an agent. Configure its MCP client with team headers:
 
 ```bash
 claude mcp add --transport http atmcp http://<host>:8000/mcp \
-  --header "Authorization: Bearer <join_token>" \
-  --header "X-ATMcp-Agent: bob"
+  --header "Authorization: Bearer <join_token>" --header "X-ATMcp-Agent: bob"
 ```
 
-Keep it available with the **runner script** (recommended — survives any turn ending/crash,
-runs the poller on a fast model and delegates heavy work to the Opus executor subagent):
+Keep it running with the runner (fast poller model + Opus `atmcp-executor` subagent for the work):
 
 ```bash
 ATMCP_MODEL=haiku ./scripts/atmcp_worker_runner.sh        # macOS/Linux
 # Windows PowerShell:  $env:ATMCP_MODEL="haiku"; ./scripts/atmcp_worker_runner.ps1
 ```
 
-> In-app alternative: `/loop 30s /atmcp-worker` (use an **explicit interval**). Avoid bare
-> `/loop /atmcp-worker` — dynamic self-paced mode relies on the model re-arming each turn and
-> can silently stop after a while (especially on Windows PowerShell). The runner script avoids
-> this entirely. The **two-model split** (cheap poller + Opus `atmcp-executor` subagent) keeps
-> polling cheap while the actual instruction is executed with full reasoning.
+> Avoid bare `/loop /atmcp-worker` (dynamic mode can silently stop, esp. Windows PowerShell —
+> use `/loop 30s` or the runner). To cut cost in this mode: use a cheap `--model`, widen the
+> poll/sleep interval, and keep the tool surface small. **Mode A avoids the per-poll cost entirely.**
 
 Optional but recommended — stable presence + real terminal-output capture:
 

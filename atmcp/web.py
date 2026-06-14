@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from atmcp import db, hub, redis_bus
 from atmcp.config import settings
 from atmcp.ids import hash_token, token_matches
+from atmcp.session import Caller
 from atmcp.services import console as console_svc
 from atmcp.services import directives as directives_svc
 from atmcp.services import identity as identity_svc
@@ -66,6 +67,17 @@ def _check_dashboard(team_row, token: str | None) -> None:
     h = team_row["dashboard_token_hash"]
     if not (token and h and token_matches(token, h)):
         raise HTTPException(status_code=401, detail="dashboard token required")
+
+
+async def _require_join(team_name: str, token: str | None):
+    """Resolve the team and require a valid join token (for write/worker endpoints)."""
+    team = await _team_by_name(team_name)
+    if team is None:
+        raise HTTPException(status_code=404, detail="unknown team")
+    h = await db.fetchval("SELECT join_token_hash FROM teams WHERE team_id=?", (team["team_id"],))
+    if not (token and h and token_matches(token, h)):
+        raise HTTPException(status_code=401, detail="invalid join token")
+    return team
 
 
 async def _snapshot(team_id: str, name: str) -> dict[str, Any]:
@@ -278,6 +290,55 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="text required")
         return await output_svc.append_output(
             team["team_id"], agent_id, text, (body or {}).get("directive_id"), source="hook"
+        )
+
+    # ── worker REST API: drive the directive loop WITHOUT an LLM (zero idle tokens) ──
+    @app.get("/api/teams/{team_name}/agents/{agent_ref}/inbox")
+    async def rest_inbox(
+        team_name: str, agent_ref: str, wait_ms: int = 0, include_running: bool = False,
+        limit: int = 20, authorization: str | None = Header(default=None),
+        x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Long-poll an agent's directive inbox over plain HTTP — a script poller can wait here
+        (up to ~30s) for work without spending any model tokens. Auth = join token."""
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token)
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent_ref)
+        if aid is None:
+            return {"ok": True, "count": 0, "directives": []}
+        caller = Caller(team["team_id"], aid, agent_ref, "rest-worker")
+        return await directives_svc.inbox(caller, wait_ms, limit, include_running)
+
+    @app.post("/api/teams/{team_name}/directives/{directive_id}/claim")
+    async def rest_claim(
+        team_name: str, directive_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or (body or {}).get("token"))
+        agent = (body or {}).get("agent")
+        if not agent:
+            raise HTTPException(status_code=400, detail="agent required")
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent)
+        if aid is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        caller = Caller(team["team_id"], aid, agent, "rest-worker")
+        return await directives_svc.claim_directive(caller, directive_id)
+
+    @app.post("/api/teams/{team_name}/directives/{directive_id}/report")
+    async def rest_report(
+        team_name: str, directive_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or (body or {}).get("token"))
+        agent = (body or {}).get("agent")
+        status = (body or {}).get("status")
+        if not agent or not status:
+            raise HTTPException(status_code=400, detail="agent and status required")
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent)
+        if aid is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        caller = Caller(team["team_id"], aid, agent, "rest-worker")
+        return await directives_svc.report_directive(
+            caller, directive_id, status, (body or {}).get("result_summary"), (body or {}).get("output")
         )
 
     @app.websocket("/ws/{team_name}")

@@ -24,10 +24,16 @@ directives; your job is to pick them up and execute them. Perform exactly ONE cy
 
 ## Running continuously (read this)
 
-Keep yourself available by looping this skill. **Most reliable (recommended):** an OS-level
-runner that re-invokes Claude Code headless each tick — see `scripts/atmcp_worker_runner.sh`
-(macOS/Linux) or `scripts/atmcp_worker_runner.ps1` (Windows). It runs the poller on a fast
-model and survives any single turn ending or crashing.
+**Cheapest (recommended): don't run this skill on a loop at all.** Use the token-free poller
+`scripts/atmcp_worker_poller.py` — it long-polls the inbox over plain HTTP (no model tokens
+while idle) and invokes `claude -p` only when a directive actually arrives. An in-agent loop
+pays a full model turn (system prompt + all tool schemas) on every poll just to find an empty
+inbox.
+
+If you do want this skill on a loop: **most reliable** is the OS-level runner that re-invokes
+Claude Code headless each tick — `scripts/atmcp_worker_runner.sh` (macOS/Linux) or
+`scripts/atmcp_worker_runner.ps1` (Windows). It runs the poller on a fast model and survives
+any single turn ending or crashing.
 
 In-app alternative: `/loop 30s /atmcp-worker` — **use an explicit interval**. Avoid bare
 `/loop /atmcp-worker` (dynamic self-paced mode): it relies on the model re-arming a wakeup

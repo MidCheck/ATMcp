@@ -168,7 +168,8 @@ atmcp/
                     · directives (console→agent commands) · output (agent output stream)
   static/           dashboard.html + dashboard.js
 prompts/            ready-to-paste agent rules + console/worker setup
-scripts/            atmcp_heartbeat.py · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
+scripts/            atmcp_worker_poller.py (token-free worker) · atmcp_heartbeat.py
+                    · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
 skills/             team (console) + atmcp-worker (worker loop) Claude Code skills
 agents/             atmcp-executor (Opus subagent the worker delegates execution to)
 ```
@@ -192,12 +193,21 @@ Server-side this is the **directive bus** (`send_directive`/`inbox`/`claim_direc
 `get_agent_output`, plus `POST /api/teams/{team}/agents/{agent}/output` for the hook).
 "Watching" is long-poll, so results surface as soon as the worker reports.
 
-**Run workers reliably.** Don't use bare `/loop /atmcp-worker` (dynamic mode relies on the
-model re-arming each turn and can silently stop, esp. on Windows PowerShell). Use the
-**runner script** (`scripts/atmcp_worker_runner.{sh,ps1}`) which re-invokes Claude Code
-headless each tick — and runs the **poller on a fast model** (`--model haiku`) while delegating
-the actual instruction to the **Opus `atmcp-executor` subagent** (`agents/atmcp-executor.md`).
-Cheap polling, strong execution. (Or `/loop 30s /atmcp-worker` with an explicit interval.)
+**Run workers cheaply.** An in-agent loop pays a full model turn (system prompt + all tool
+schemas) on *every* poll just to find an empty inbox — millions of wasted tokens/day. Prefer
+the **token-free poller** `scripts/atmcp_worker_poller.py`: it long-polls the inbox over plain
+HTTP (zero tokens while idle) and invokes `claude -p` only when a directive actually arrives:
+
+```bash
+python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
+  --team <team> --token <join_token> --name bob --model opus   # --dry-run to test
+```
+
+It uses the worker REST API (`GET …/agents/{agent}/inbox` long-poll, `POST …/directives/{id}/claim`,
+`…/report`). If you'd rather run the `atmcp-worker` **skill** as an agent loop, use the runner
+`scripts/atmcp_worker_runner.{sh,ps1}` (fast poller model + Opus `atmcp-executor` subagent) —
+and avoid bare `/loop /atmcp-worker` (dynamic mode can silently stop, esp. Windows PowerShell;
+use `/loop 30s`).
 
 ## Making agents actually use it
 

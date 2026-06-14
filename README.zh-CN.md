@@ -131,11 +131,18 @@ MCP 是**拉,不是推**:工具是"可用"的,但模型自己决定何时调用,
 `POST /api/teams/{team}/agents/{agent}/output`)。"watch/通知"靠长轮询实现 —— worker 一上报,
 结果立刻出现在对话里。
 
-**可靠地跑 worker**:不要用裸 `/loop /atmcp-worker`(动态模式依赖模型每回合重新排程,跑一段时间会
-悄悄停掉,Windows PowerShell 尤其明显)。改用**运行脚本** `scripts/atmcp_worker_runner.{sh,ps1}`:
-它每个 tick 以 headless 方式重新拉起 Claude Code,且**轮询用轻量模型**(`--model haiku`),把真正的
-指令执行**委派给 Opus 的 `atmcp-executor` 子 agent**(`agents/atmcp-executor.md`)—— 轮询便宜、执行
-够强。(或用 `/loop 30s /atmcp-worker`,带显式间隔。)详见
+**省 token 地跑 worker**:在模型里一直 loop `atmcp-worker` 很费 token —— 每次轮询都是一整个模型回合
+(system prompt + 全部工具 schema),仅为发现"收件箱是空的",一天能白烧几百万 token。**首选零 token
+轮询器** `scripts/atmcp_worker_poller.py`:纯 HTTP 长轮询收件箱(空闲时**零模型 token**),只有真有
+指令时才 `claude -p` 起一次模型执行:
+```bash
+python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
+  --team <team> --token <join_token> --name bob --model opus   # 加 --dry-run 可空跑测试
+```
+它走 worker REST API(`GET …/agents/{agent}/inbox` 长轮询、`POST …/directives/{id}/claim`、`…/report`)。
+若更想把 `atmcp-worker` **技能**当 agent 循环跑,用运行脚本 `scripts/atmcp_worker_runner.{sh,ps1}`
+(轻量模型轮询 + Opus `atmcp-executor` 子 agent 执行);别用裸 `/loop /atmcp-worker`(动态模式会悄悄
+停,Windows PowerShell 尤其明显;改用 `/loop 30s`)。详见
 **[`prompts/console-worker.md`](prompts/console-worker.md)** 与 **[`skills/`](skills/)**。
 
 ## 网页看板
@@ -208,7 +215,8 @@ atmcp/
                     · directives(console→agent 指令)· output(agent 输出流)
   static/           dashboard.html + dashboard.js
 prompts/            现成的 Agent 规则 + console/worker 配置说明
-scripts/            atmcp_heartbeat.py · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
+scripts/            atmcp_worker_poller.py(零 token worker)· atmcp_heartbeat.py
+                    · atmcp_output_hook.py · atmcp_worker_runner.{sh,ps1}
 skills/             team(控制台)+ atmcp-worker(worker 循环)Claude Code 技能
 agents/             atmcp-executor(worker 委派执行用的 Opus 子 agent)
 ```
