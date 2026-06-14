@@ -203,8 +203,12 @@ python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
   --team <team> --token <join_token> --name bob --model opus   # --dry-run to test
 ```
 
-It uses the worker REST API (`GET …/agents/{agent}/inbox` long-poll, `POST …/directives/{id}/claim`,
-`…/report`). If you'd rather run the `atmcp-worker` **skill** as an agent loop, use the runner
+By default it keeps **one resumable session per worker** (`--session-mode resume`: captures the
+Claude `session_id` and `--resume`s it each directive) so the worker **remembers prior tasks**
+while idle polling stays token-free; the inbox long-poll returns the instant a directive is sent
+(don't use `/loop` — 1-min cron). It uses the worker REST API (`GET …/agents/{agent}/inbox`
+long-poll, `POST …/directives/{id}/claim`, `…/report`). If you'd rather run the `atmcp-worker`
+**skill** as an agent loop, use the runner
 `scripts/atmcp_worker_runner.{sh,ps1}` (fast poller model + Opus `atmcp-executor` subagent) —
 and avoid bare `/loop /atmcp-worker` (dynamic mode can silently stop, esp. Windows PowerShell;
 use `/loop 30s`).

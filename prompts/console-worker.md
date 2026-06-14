@@ -35,10 +35,22 @@ python scripts/atmcp_worker_poller.py \
 ```
 
 The poller heartbeats (presence + registers the name), long-polls the inbox, and on a directive
-it claims → runs `claude -p --model <model> "<instruction>"` → reports the result and streams
-output. The executor model runs **per directive only**. `--dry-run` tests the loop without
-calling the model. Needs the `claude` CLI on PATH with the atmcp MCP server configured (so the
-executor can use team tools when a directive needs them).
+it claims → runs the executor → reports the result and streams output. The executor model runs
+**per directive only**. `--dry-run` tests the loop without calling the model. Needs the `claude`
+CLI on PATH with the atmcp MCP server configured (so the executor can use team tools).
+
+**Memory across tasks (default).** The poller runs `--session-mode resume`: it keeps ONE session
+per worker — captures the Claude `session_id` (`--output-format json`) and `--resume`s it on every
+directive — so the worker remembers prior directives and Claude auto-compacts the context. Memory
+persists while idle polling stays token-free (the watcher polls, not the model). Session ids are
+saved under `--state-dir` (default `~/.atmcp`) so they survive poller restarts. Use
+`--session-mode fresh` for stateless tasks. For Codex/Cursor, plug their resume flag:
+`--executor-cmd "codex exec --last {prompt}"` or `"cursor-agent -p --resume {prompt}"` (run with
+`--workdir <dir>`; note Cursor headless resume is unreliable as of early 2026).
+
+**Latency.** The inbox long-poll returns the *instant* a directive is sent (≈ms) — so don't use
+`/loop` (1-minute cron granularity). End-to-end ≈ executor spin-up + resume load (a few seconds).
+Process one directive at a time (the poller is serial), so a single worker never double-runs.
 
 ### Mode B — in-agent loop (simpler, but pays tokens per poll)
 
