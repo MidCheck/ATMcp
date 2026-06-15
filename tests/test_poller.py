@@ -1,4 +1,9 @@
-"""Poller command builders: resume wiring + argv-safety (no shell injection)."""
+"""Poller command builders: resume wiring, pass-through flags, argv-safety.
+
+The prompt is fed to `claude -p` via STDIN (see run_executor), so it is intentionally NOT
+present in the argv built by build_claude_cmd — that keeps `claude -p` from ever mis-parsing
+the prompt regardless of flag order.
+"""
 
 from __future__ import annotations
 
@@ -21,17 +26,32 @@ poller = _load()
 
 def test_claude_cmd_resumes_session():
     args = SimpleNamespace(model="opus", allowed_tools="mcp__atmcp", session_mode="resume")
-    cmd = poller.build_claude_cmd(args, "do x", "sess-123")
+    cmd = poller.build_claude_cmd(args, "sess-123")
+    assert cmd[:2] == ["claude", "-p"]
     assert "--resume" in cmd and "sess-123" in cmd
     assert "--output-format" in cmd and "json" in cmd
-    assert "do x" in cmd[-1]
+    # the prompt is fed via stdin, so it must NOT be in argv
+    assert not any("DIRECTIVE" in str(x) for x in cmd)
 
 
 def test_claude_cmd_no_resume_when_fresh_or_no_sid():
-    fresh = poller.build_claude_cmd(SimpleNamespace(model="opus", allowed_tools="", session_mode="fresh"), "x", "s1")
+    fresh = poller.build_claude_cmd(SimpleNamespace(model="opus", allowed_tools="", session_mode="fresh"), "s1")
     assert "--resume" not in fresh
-    nosid = poller.build_claude_cmd(SimpleNamespace(model="opus", allowed_tools="", session_mode="resume"), "x", None)
+    nosid = poller.build_claude_cmd(SimpleNamespace(model="opus", allowed_tools="", session_mode="resume"), None)
     assert "--resume" not in nosid
+
+
+def test_claude_cmd_passes_through_extra_flags():
+    args = SimpleNamespace(model="opus", allowed_tools="mcp__atmcp", session_mode="resume",
+                           claude_args="--add-dir /repo --add-dir /shared --permission-mode acceptEdits")
+    cmd = poller.build_claude_cmd(args, "sess-1")
+    assert cmd.count("--add-dir") == 2 and "/repo" in cmd and "/shared" in cmd
+    assert "--permission-mode" in cmd and "acceptEdits" in cmd
+
+
+def test_claude_cmd_without_extra_flags_still_works():
+    cmd = poller.build_claude_cmd(SimpleNamespace(model="opus", allowed_tools="", session_mode="resume", claude_args=""), None)
+    assert cmd[0] == "claude" and "-p" in cmd
 
 
 def test_custom_cmd_is_argv_safe_against_injection():
@@ -41,23 +61,6 @@ def test_custom_cmd_is_argv_safe_against_injection():
     # the malicious text stays inside exactly ONE argv element (no shell parsing)
     assert sum(1 for p in cmd if evil in p) == 1
     assert evil in cmd[-1]
-
-
-def test_claude_cmd_passes_through_extra_flags():
-    args = SimpleNamespace(model="opus", allowed_tools="mcp__atmcp", session_mode="resume",
-                           claude_args="--add-dir /repo --permission-mode acceptEdits")
-    cmd = poller.build_claude_cmd(args, "do x", "sess-1")
-    assert "--add-dir" in cmd and "/repo" in cmd
-    assert "--permission-mode" in cmd and "acceptEdits" in cmd
-    # extra flags come before the trailing prompt
-    assert cmd[-1].endswith("do x")
-    assert cmd.index("--add-dir") < len(cmd) - 1
-
-
-def test_claude_cmd_without_extra_flags_still_works():
-    args = SimpleNamespace(model="opus", allowed_tools="", session_mode="resume", claude_args="")
-    cmd = poller.build_claude_cmd(args, "do x", None)
-    assert cmd[0] == "claude" and cmd[-1].endswith("do x")
 
 
 def test_custom_cmd_appends_prompt_without_token():

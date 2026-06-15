@@ -116,7 +116,9 @@ def save_session_id(args, session_id: str | None) -> None:
 
 
 # ── command builders (argv lists — never shell strings, so no injection) ──────
-def build_claude_cmd(args, instruction: str, session_id: str | None) -> list[str]:
+def build_claude_cmd(args, session_id: str | None) -> list[str]:
+    """Claude flags only — the prompt is fed via STDIN (see run_executor), so flag order can
+    never swallow the prompt and `claude -p` always has its prompt."""
     cmd = ["claude", "-p", "--output-format", "json", "--model", args.model]
     if args.allowed_tools:
         cmd += ["--allowedTools", args.allowed_tools]
@@ -128,13 +130,11 @@ def build_claude_cmd(args, instruction: str, session_id: str | None) -> list[str
     extra = getattr(args, "claude_args", "") or ""
     if extra:
         cmd += shlex.split(extra)
-    cmd.append(EXEC_PROMPT.format(instruction=instruction))
     return cmd
 
 
-def build_custom_cmd(template: str, instruction: str) -> list[str]:
+def build_custom_cmd(template: str, prompt: str) -> list[str]:
     # Split the template safely, then substitute the {prompt} token as ONE argv element.
-    prompt = EXEC_PROMPT.format(instruction=instruction)
     parts = shlex.split(template)
     if "{prompt}" in parts:
         return [prompt if p == "{prompt}" else p for p in parts]
@@ -143,21 +143,25 @@ def build_custom_cmd(template: str, instruction: str) -> list[str]:
 
 def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, str, str | None]:
     """Returns (ok, result_text, new_session_id)."""
+    prompt = EXEC_PROMPT.format(instruction=instruction)
     if args.dry_run:
         mode = f"resume {session_id[-6:]}" if session_id else "new session"
         return True, f"[dry-run] would execute ({mode}) via {args.executor_cmd or 'claude'}: {instruction[:120]}", session_id
 
     cwd = None
+    run_kwargs: dict = {}
     if args.executor_cmd:
-        cmd = build_custom_cmd(args.executor_cmd, instruction)
+        cmd = build_custom_cmd(args.executor_cmd, prompt)  # prompt is an argv element
+        run_kwargs["stdin"] = subprocess.DEVNULL
         if args.workdir:
             cwd = os.path.join(os.path.expanduser(args.workdir), args.name)
             os.makedirs(cwd, exist_ok=True)
     else:
-        cmd = build_claude_cmd(args, instruction, session_id)
+        cmd = build_claude_cmd(args, session_id)  # prompt goes via stdin
+        run_kwargs["input"] = prompt
 
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=args.executor_timeout, cwd=cwd)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=args.executor_timeout, cwd=cwd, **run_kwargs)
     except subprocess.TimeoutExpired:
         return False, "executor timed out", session_id
     except FileNotFoundError:
