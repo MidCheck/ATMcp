@@ -43,6 +43,23 @@ def test_custom_cmd_is_argv_safe_against_injection():
     assert evil in cmd[-1]
 
 
+def test_claude_cmd_passes_through_extra_flags():
+    args = SimpleNamespace(model="opus", allowed_tools="mcp__atmcp", session_mode="resume",
+                           claude_args="--add-dir /repo --permission-mode acceptEdits")
+    cmd = poller.build_claude_cmd(args, "do x", "sess-1")
+    assert "--add-dir" in cmd and "/repo" in cmd
+    assert "--permission-mode" in cmd and "acceptEdits" in cmd
+    # extra flags come before the trailing prompt
+    assert cmd[-1].endswith("do x")
+    assert cmd.index("--add-dir") < len(cmd) - 1
+
+
+def test_claude_cmd_without_extra_flags_still_works():
+    args = SimpleNamespace(model="opus", allowed_tools="", session_mode="resume", claude_args="")
+    cmd = poller.build_claude_cmd(args, "do x", None)
+    assert cmd[0] == "claude" and cmd[-1].endswith("do x")
+
+
 def test_custom_cmd_appends_prompt_without_token():
     cmd = poller.build_custom_cmd("mytool run", "hello")
     assert cmd[:2] == ["mytool", "run"]

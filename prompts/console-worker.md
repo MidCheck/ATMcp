@@ -48,6 +48,17 @@ saved under `--state-dir` (default `~/.atmcp`) so they survive poller restarts. 
 `--executor-cmd "codex exec --last {prompt}"` or `"cursor-agent -p --resume {prompt}"` (run with
 `--workdir <dir>`; note Cursor headless resume is unreliable as of early 2026).
 
+**Extra `claude` flags.** Don't pass `--resume` yourself — the poller manages it. For any other
+flag (e.g. extra working dirs, permission mode, an mcp config), use `--claude-args`, which is
+shlex-split and forwarded to `claude -p`:
+```bash
+python scripts/atmcp_worker_poller.py --team my-team --token <jt> --name bob \
+  --claude-args "--add-dir /repo --add-dir /shared --permission-mode acceptEdits"
+```
+Don't put `--model / --resume / --output-format / --allowedTools` in `--claude-args` (the poller
+sets those via `--model`, the session logic, and `--allowed-tools`). To pick up an *existing*
+Claude session at startup, use `--resume-session <id>`.
+
 **Latency.** The inbox long-poll returns the *instant* a directive is sent (≈ms) — so don't use
 `/loop` (1-minute cron granularity). End-to-end ≈ executor spin-up + resume load (a few seconds).
 Process one directive at a time (the poller is serial), so a single worker never double-runs.

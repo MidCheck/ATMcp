@@ -122,6 +122,12 @@ def build_claude_cmd(args, instruction: str, session_id: str | None) -> list[str
         cmd += ["--allowedTools", args.allowed_tools]
     if args.session_mode == "resume" and session_id:
         cmd += ["--resume", session_id]
+    # Pass-through flags (e.g. --add-dir /repo, --permission-mode acceptEdits, --mcp-config ...).
+    # The poller already manages --model / --resume / --output-format / --allowedTools, so don't
+    # repeat those here. shlex.split → argv list (no shell).
+    extra = getattr(args, "claude_args", "") or ""
+    if extra:
+        cmd += shlex.split(extra)
     cmd.append(EXEC_PROMPT.format(instruction=instruction))
     return cmd
 
@@ -189,6 +195,12 @@ def main() -> None:
     ap.add_argument("--state-dir", default=os.environ.get("ATMCP_STATE_DIR", "~/.atmcp"),
                     help="where per-worker session ids are persisted")
     ap.add_argument("--allowed-tools", default=os.environ.get("ATMCP_ALLOWED", "mcp__atmcp,Read,Edit,Bash,Write,Grep,Glob"))
+    ap.add_argument("--claude-args", default=os.environ.get("ATMCP_CLAUDE_ARGS", ""),
+                    help="extra flags passed through to `claude -p`, e.g. \"--add-dir /repo "
+                         "--permission-mode acceptEdits\". shlex-split; do NOT put "
+                         "--model/--resume/--output-format/--allowedTools here (poller manages those).")
+    ap.add_argument("--resume-session", default=os.environ.get("ATMCP_RESUME_SESSION"),
+                    help="resume an EXISTING claude session id at startup (seeds this worker's session)")
     ap.add_argument("--wait-ms", type=int, default=30000, help="inbox long-poll window")
     ap.add_argument("--idle-sleep", type=float, default=1.0)
     ap.add_argument("--executor-timeout", type=float, default=1800.0)
@@ -197,6 +209,9 @@ def main() -> None:
 
     c = Client(args.url, args.team, args.token, args.name)
     session_id = load_session_id(args)
+    if args.resume_session and not session_id:
+        session_id = args.resume_session  # seed from an existing claude session
+        save_session_id(args, session_id)
     print(f"[atmcp] poller '{args.name}' team='{args.team}' executor={args.executor_cmd or ('claude --model ' + args.model)} "
           f"session-mode={args.session_mode}{' (resuming ' + session_id[-6:] + ')' if session_id else ''}"
           f"{' (dry-run)' if args.dry_run else ''}. Idle polling is token-free. Ctrl-C to stop.", flush=True)
