@@ -30,6 +30,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
+import re
 import shlex
 import subprocess
 import sys
@@ -168,13 +170,18 @@ def over_budget(args, spent_usd: float, spent_tokens: int) -> str | None:
 
 
 # ── command builders (argv lists — never shell strings, so no injection) ──────
-def build_claude_cmd(args, session_id: str | None) -> list[str]:
+def build_claude_cmd(args, session_id: str | None, force_resume: bool = False) -> list[str]:
     """Claude flags only — the prompt is fed via STDIN (see run_executor), so flag order can
-    never swallow the prompt and `claude -p` always has its prompt."""
+    never swallow the prompt and `claude -p` always has its prompt.
+
+    `force_resume` makes a transient-failure RETRY resume the captured session even in
+    `--session-mode fresh`, so the model continues the partial run instead of re-executing
+    its side effects from scratch (the fresh-vs-resume distinction is still honored *across*
+    directives — only the within-directive retry resumes)."""
     cmd = ["claude", "-p", "--output-format", "json", "--model", args.model]
     if args.allowed_tools:
         cmd += ["--allowedTools", args.allowed_tools]
-    if args.session_mode == "resume" and session_id:
+    if session_id and (args.session_mode == "resume" or force_resume):
         cmd += ["--resume", session_id]
     # Pass-through flags (e.g. --add-dir /repo, --permission-mode acceptEdits, --mcp-config ...).
     # The poller already manages --model / --resume / --output-format / --allowedTools, so don't
@@ -213,8 +220,56 @@ def _extract_usage(j: dict, model: str) -> dict | None:
     return None
 
 
-def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, str, str | None, dict | None]:
-    """Returns (ok, result_text, new_session_id, usage_or_None)."""
+# ── transient-failure retry (upstream API hiccups: overload / rate-limit / network) ──
+# Retry ONLY these. Everything else (auth, blocked command, bad instruction, a genuinely
+# wrong result) is permanent — retrying just burns tokens, so we report it failed at once.
+_TRANSIENT_MARKERS = (
+    "overloaded", "overloaded_error", "rate limit", "rate_limit", "ratelimit", "too many requests",
+    "timeout", "timed out", "deadline exceeded",
+    "connection error", "connection reset", "connection refused", "econnreset", "econnrefused",
+    "broken pipe", "remotedisconnected", "tls handshake", "getaddrinfo", "name resolution",
+    "network", "fetch failed", "temporarily unavailable", "service unavailable",
+    "try again", "please retry", "retry your request",
+)
+# A 429/5xx ONLY when it sits next to an http/error/api keyword — so we match "API Error: 529"
+# / "HTTP 503" / "status 502" but NOT a model summary that merely says "processed 500 records".
+_TRANSIENT_STATUS = re.compile(
+    r"(?:http|https|status|code|error|err|api)\b[^0-9A-Za-z]{0,12}(429|5\d\d)\b", re.I
+)
+
+
+def is_retriable(text: str) -> bool:
+    """True if the failure text looks like a transient upstream-API/network hiccup.
+    Conservative on purpose: a permanent failure (auth, blocked command, a genuinely wrong
+    result) must NOT be retried, so unknown text is treated as permanent."""
+    t = (text or "").lower()
+    if any(m in t for m in _TRANSIENT_MARKERS):
+        return True
+    return bool(_TRANSIENT_STATUS.search(t))
+
+
+def retry_delay(attempt: int, base: float, cap: float = 60.0) -> float:
+    """Exponential backoff with full jitter (attempt is 1-based)."""
+    raw = min(cap, base * (2 ** (attempt - 1)))
+    return round(raw * (0.5 + random.random()), 2)  # 0.5×–1.5× jitter
+
+
+def _sleep_with_heartbeat(client, delay: float, status: str, beat_every: float = 15.0) -> None:
+    """Sleep `delay` seconds while heartbeating every ~15s, so a long backoff doesn't let the
+    worker's presence key (30s TTL) expire and show it offline mid-retry."""
+    remaining = delay
+    while remaining > 0:
+        client.heartbeat(status)
+        chunk = min(beat_every, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+
+
+def run_executor(args, instruction: str, session_id: str | None,
+                 force_resume: bool = False) -> tuple[bool, str, str | None, dict | None]:
+    """Returns (ok, result_text, new_session_id, usage_or_None).
+
+    `force_resume` (set on transient retries) resumes the captured session even in fresh mode."""
     prompt = EXEC_PROMPT.format(instruction=instruction)
     if args.dry_run:
         mode = f"resume {session_id[-6:]}" if session_id else "new session"
@@ -229,7 +284,7 @@ def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, 
             cwd = os.path.join(os.path.expanduser(args.workdir), args.name)
             os.makedirs(cwd, exist_ok=True)
     else:
-        cmd = build_claude_cmd(args, session_id)  # prompt goes via stdin
+        cmd = build_claude_cmd(args, session_id, force_resume)  # prompt goes via stdin
         run_kwargs["input"] = prompt
 
     try:
@@ -284,6 +339,16 @@ def main() -> None:
                     help="total (input+output) token budget; pauses when reached. 0 = unlimited.")
     ap.add_argument("--reset-usage", action="store_true",
                     help="zero this worker's cumulative cost/token counters at startup")
+    ap.add_argument("--max-retries", type=int, default=int(os.environ.get("ATMCP_MAX_RETRIES") or 3),
+                    help="on a TRANSIENT failure (API overload/rate-limit/network/5xx) retry the "
+                         "directive this many times with exponential backoff, resuming the captured "
+                         "session so the model continues rather than redoing work (this resume holds "
+                         "even in --session-mode fresh, just for the retry). 0 = no retry. Permanent "
+                         "failures (auth, blocked, bad result) are never retried. NOTE: a custom "
+                         "--executor-cmd must handle its own resume, so its retries may re-run "
+                         "non-idempotent side effects.")
+    ap.add_argument("--retry-backoff", type=float, default=float(os.environ.get("ATMCP_RETRY_BACKOFF") or 2.0),
+                    help="base seconds for retry backoff (2,4,8… capped at 60, with jitter)")
     ap.add_argument("--wait-ms", type=int, default=30000, help="inbox long-poll window")
     ap.add_argument("--idle-sleep", type=float, default=1.0)
     ap.add_argument("--executor-timeout", type=float, default=1800.0)
@@ -305,6 +370,7 @@ def main() -> None:
         budget_desc += f" token-budget={args.token_budget:,}"
     print(f"[atmcp] poller '{args.name}' team='{args.team}' executor={args.executor_cmd or ('claude --model ' + args.model)} "
           f"session-mode={args.session_mode}{' (resuming ' + session_id[-6:] + ')' if session_id else ''}"
+          f" retries={args.max_retries}"
           f"{budget_desc}{f' spent=${spent_usd:.2f}/{spent_tokens:,}tok' if (spent_usd or spent_tokens) else ''}"
           f"{' (dry-run)' if args.dry_run else ''}. Idle polling is token-free. Ctrl-C to stop.", flush=True)
 
@@ -336,24 +402,45 @@ def main() -> None:
             c.heartbeat(f"executing: {instruction[:40]}")
             c.append_output(f"▶ started: {instruction[:200]}", did)
 
-            ok, result, new_sid, usage = run_executor(args, instruction, session_id)
-            if new_sid and new_sid != session_id:
-                session_id = new_sid
-                save_session_id(args, session_id)
-            if usage:
-                c.report_usage(usage, did)
-                spent_usd += usage["cost_usd"]
-                spent_tokens += usage["input_tokens"] + usage["output_tokens"]
-                save_usage_totals(args, spent_usd, spent_tokens)
+            attempt = 0
+            retry_sid = None  # carries the partial session across transient retries
+            while True:
+                ok, result, new_sid, usage = run_executor(
+                    args, instruction, retry_sid if attempt else session_id, force_resume=bool(attempt)
+                )
+                if new_sid and new_sid != session_id:
+                    session_id = new_sid
+                    save_session_id(args, session_id)  # no-op in fresh mode
+                retry_sid = new_sid or retry_sid       # resume THIS session on the next retry
+                if usage:  # every attempt can cost tokens — account each one
+                    c.report_usage(usage, did)
+                    spent_usd += usage["cost_usd"]
+                    spent_tokens += usage["input_tokens"] + usage["output_tokens"]
+                    save_usage_totals(args, spent_usd, spent_tokens)
+                # Only retry genuine transient (API/network) failures; never permanent ones.
+                if ok or attempt >= args.max_retries or not is_retriable(result):
+                    break
+                if over_budget(args, spent_usd, spent_tokens):
+                    result += "  [retry skipped: budget reached]"
+                    break
+                attempt += 1
+                delay = retry_delay(attempt, args.retry_backoff)
+                note = (f"⟳ transient failure, retry {attempt}/{args.max_retries} in {delay:.0f}s "
+                        f"(resuming session): {result[:160]}")
+                c.append_output(note, did)
+                print(f"[atmcp] {note}", file=sys.stderr, flush=True)
+                _sleep_with_heartbeat(c, delay, f"retrying {attempt}/{args.max_retries}")
 
             c.append_output(result, did)
             summary = (result.splitlines()[0] if result else "")[:200]
-            c.report(did, "done" if ok else "failed", summary, result)
+            status = "done" if ok else "failed"
+            c.report(did, status, summary, result)
+            retry_note = f" after {attempt} retr{'y' if attempt == 1 else 'ies'}" if attempt else ""
             usage_note = ""
             if usage:
                 usage_note = (f" · {usage['input_tokens'] + usage['output_tokens']:,}tok "
                               f"${usage['cost_usd']:.3f} (cum ${spent_usd:.2f})")
-            print(f"[atmcp] reported {did[-6:]}: {'done' if ok else 'failed'}"
+            print(f"[atmcp] reported {did[-6:]}: {status}{retry_note}"
                   f"{' · session ' + session_id[-6:] if session_id else ''}{usage_note}", flush=True)
         except urllib.error.HTTPError as e:
             print(f"[atmcp] HTTP {e.code}: {e.read().decode(errors='replace')[:200]}", file=sys.stderr, flush=True)

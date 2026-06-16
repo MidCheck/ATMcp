@@ -67,6 +67,14 @@ per worker in `--state-dir`, surviving restarts) reaches it, the worker **stops 
 "paused: budget reached". Raise the budget or pass `--reset-usage` to resume. Custom `--executor-cmd`
 tools don't emit that JSON, so they report no token data.
 
+**Transient-failure retry.** If a directive fails on a *transient* upstream hiccup (API overload /
+429 / 5xx / network / timeout) the poller retries it with exponential backoff (`--max-retries`,
+default 3; `--retry-backoff`, default 2s → 2/4/8…capped 60, jittered), **resuming the same session**
+so the model continues rather than redoing work. **Permanent** failures (auth, a guard-blocked
+command, a bad instruction, or a genuinely wrong result) are reported failed immediately — never
+retried, so you don't burn tokens on a doomed run. Each attempt's tokens are still metered and count
+toward the budget; retries stop early if the budget is reached. `--max-retries 0` disables it.
+
 **Latency.** The inbox long-poll returns the *instant* a directive is sent (≈ms) — so don't use
 `/loop` (1-minute cron granularity). End-to-end ≈ executor spin-up + resume load (a few seconds).
 Process one directive at a time (the poller is serial), so a single worker never double-runs.

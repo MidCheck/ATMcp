@@ -41,6 +41,15 @@ def test_claude_cmd_no_resume_when_fresh_or_no_sid():
     assert "--resume" not in nosid
 
 
+def test_claude_cmd_force_resume_overrides_fresh():
+    # a transient RETRY resumes the captured session even in fresh mode (continue, don't re-run)
+    args = SimpleNamespace(model="opus", allowed_tools="", session_mode="fresh")
+    cmd = poller.build_claude_cmd(args, "sess-9", force_resume=True)
+    assert "--resume" in cmd and "sess-9" in cmd
+    # but force_resume with no session id still can't resume
+    assert "--resume" not in poller.build_claude_cmd(args, None, force_resume=True)
+
+
 def test_claude_cmd_passes_through_extra_flags():
     args = SimpleNamespace(model="opus", allowed_tools="mcp__atmcp", session_mode="resume",
                            claude_args="--add-dir /repo --add-dir /shared --permission-mode acceptEdits")
@@ -115,3 +124,47 @@ def test_reset_usage_zeroes_totals(tmp_path):
     poller.save_usage_totals(args, 9.99, 1000)
     poller.save_usage_totals(args, 0.0, 0)
     assert poller.load_usage_totals(args) == (0.0, 0)
+
+
+# ── transient-failure retry classification + backoff ─────────────────────────
+def test_is_retriable_transient_failures():
+    for t in [
+        "API Error: 529 overloaded_error",
+        "Error 503 Service Unavailable",
+        "rate_limit_error: too many requests",
+        "Connection reset by peer",
+        "fetch failed",
+        "executor timed out",
+        "API Error: 502 Bad Gateway",
+        "Overloaded, please retry your request",
+    ]:
+        assert poller.is_retriable(t), t
+
+
+def test_is_retriable_permanent_failures():
+    for t in [
+        "API Error: 401 authentication_error",   # auth → never retry
+        "API Error: 403 permission denied",
+        "API Error: 400 invalid_request_error",
+        "command blocked by guard",
+        "executor not found: claude",
+        "the test suite reports 3 failing assertions",  # a real, correct 'failed' result
+        "",
+    ]:
+        assert not poller.is_retriable(t), t
+
+
+def test_is_retriable_does_not_match_unrelated_digits():
+    # a benign result that happens to contain a 5xx-looking number must not trigger retry
+    assert not poller.is_retriable("processed 5123 records successfully")  # 5123 not a bare 5xx token
+    assert poller.is_retriable("got HTTP 500 from the model API")          # bare 500 does
+
+
+def test_retry_delay_grows_and_caps():
+    base = 2.0
+    d1 = poller.retry_delay(1, base)
+    d3 = poller.retry_delay(3, base)
+    assert 1.0 <= d1 <= 3.0          # 2 × [0.5,1.5]
+    assert d3 <= 60.0 * 1.5          # capped at 60 before jitter
+    # a late attempt is bounded by the cap, never unbounded
+    assert poller.retry_delay(20, base) <= 60.0 * 1.5

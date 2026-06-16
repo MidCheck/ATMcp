@@ -201,6 +201,7 @@ budget reached"——后台跑再久也不会无声烧穿限额。调高预算�
 | 失效 | 行为 |
 |---|---|
 | Agent 崩溃 / 网络分区 | 心跳 key 过期 → 显示离线;持有的租约过期 → reaper 重派;最后一次持久进度仍在。 |
+| 上游 API 瞬时失败(过载 / 429 / 5xx / 网络) | poller 以带抖动的指数退避重试该指令(`--max-retries`),并 resume 同一 session 让模型续跑;永久失败(鉴权、被拦、结果实质错误)立即报 failed,绝不重试。 |
 | Agent 重连 | 重新 `join_team`(经 `(team, display_name)` 复用同一 `agent_id`)→ `sync(since_event_id)` 补帧。 |
 | 重复 / 重试调用 | `idem_key` 返回已存结果;相同知识自动去重;过期 fencing token 被拒。 |
 | Redis 宕机 | 变更仍提交到 SQLite;在线状态降级到 `last_seen`;防重复认领仍由 DB 保证。 |

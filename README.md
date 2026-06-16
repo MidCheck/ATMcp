@@ -154,6 +154,7 @@ See `.env.example`. Highlights: `ATMCP_ADMIN_TOKEN`, `ATMCP_SQLITE_PATH`, `ATMCP
 | Failure | Behavior |
 |---|---|
 | Agent crash / partition | heartbeat key expires → shown offline; held lease expires → reaper re-queues; last durable progress kept. |
+| Transient upstream API failure (overload / 429 / 5xx / network) | the poller retries the directive with jittered exponential backoff (`--max-retries`), resuming the same session so the model continues; permanent failures (auth, blocked, bad result) are reported failed at once — never retried. |
 | Agent reconnect | re-`join_team` (same `agent_id` via `(team, display_name)`) → `sync(since_event_id)` to catch up. |
 | Duplicate / retried call | `idem_key` returns the stored result; identical knowledge auto-dedupes; stale fencing token rejected. |
 | Redis down | mutations still commit to SQLite; presence falls back to `last_seen`; double-claim still prevented by the DB. |
