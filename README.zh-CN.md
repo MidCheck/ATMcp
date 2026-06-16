@@ -139,6 +139,9 @@ MCP 是**拉,不是推**:工具是"可用"的,但模型自己决定何时调用,
 python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
   --team <team> --token <join_token> --name bob --model opus   # 加 --dry-run 可空跑测试
 ```
+
+完整参数 / 环境变量速查(记忆、预算刹车、重试、自定义执行器):见
+**[`prompts/poller-usage.md`](prompts/poller-usage.md)** 或 `--help`。
 默认**每个 worker 保持一个可恢复 session**(`--session-mode resume`:抓取 Claude `session_id` 并在每条
 指令时 `--resume`),所以 worker **记得之前的任务**(Claude 自动压缩上下文),而空闲轮询仍是零 token;
 收件箱长轮询在指令发出瞬间返回(别用 `/loop` 的 1 分钟 cron)。它走 worker REST API

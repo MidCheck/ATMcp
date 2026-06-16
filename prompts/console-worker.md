@@ -34,6 +34,9 @@ python scripts/atmcp_worker_poller.py \
   --url http://<host>:8000 --team <team> --token <join_token> --name bob --model opus
 ```
 
+> **Full flag/env reference:** see **[`poller-usage.md`](poller-usage.md)** (all options, defaults,
+> and examples) — or `python scripts/atmcp_worker_poller.py --help`.
+
 The poller heartbeats (presence + registers the name), long-polls the inbox, and on a directive
 it claims → runs the executor → reports the result and streams output. The executor model runs
 **per directive only**. `--dry-run` tests the loop without calling the model. Needs the `claude`

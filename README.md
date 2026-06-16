@@ -224,6 +224,9 @@ python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
   --team <team> --token <join_token> --name bob --model opus   # --dry-run to test
 ```
 
+Full flag/env reference (memory, budget brake, retry, custom executors): see
+**[`prompts/poller-usage.md`](prompts/poller-usage.md)** or `--help`.
+
 By default it keeps **one resumable session per worker** (`--session-mode resume`: captures the
 Claude `session_id` and `--resume`s it each directive) so the worker **remembers prior tasks**
 while idle polling stays token-free; the inbox long-poll returns the instant a directive is sent
