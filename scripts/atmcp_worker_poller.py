@@ -33,6 +33,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -192,6 +193,23 @@ def build_claude_cmd(args, session_id: str | None, force_resume: bool = False) -
     return cmd
 
 
+def _win_wrap(cmd: list[str]) -> list[str]:
+    """Windows: npm installs `claude` as a `.cmd` shim that CreateProcess can't launch directly
+    (subprocess raises WinError 2/193). Resolve it via PATHEXT and, if it's a `.cmd`/`.bat`, run
+    it through `cmd /c`. A real `.exe` is used by full path; non-Windows is a no-op.
+
+    Safe to cmd-wrap HERE because the claude prompt is fed via STDIN — argv carries only
+    operator-controlled flags (no directive text), so there's no shell-injection surface."""
+    if os.name != "nt":
+        return cmd
+    exe = shutil.which(cmd[0])
+    if not exe:
+        return cmd  # leave as-is → subprocess raises a clear "executor not found"
+    if exe.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", exe, *cmd[1:]]
+    return [exe, *cmd[1:]]
+
+
 def build_custom_cmd(template: str, prompt: str) -> list[str]:
     # Split the template safely, then substitute the {prompt} token as ONE argv element.
     parts = shlex.split(template)
@@ -284,7 +302,7 @@ def run_executor(args, instruction: str, session_id: str | None,
             cwd = os.path.join(os.path.expanduser(args.workdir), args.name)
             os.makedirs(cwd, exist_ok=True)
     else:
-        cmd = build_claude_cmd(args, session_id, force_resume)  # prompt goes via stdin
+        cmd = _win_wrap(build_claude_cmd(args, session_id, force_resume))  # prompt goes via stdin
         run_kwargs["input"] = prompt
 
     try:

@@ -100,6 +100,26 @@ python scripts/atmcp_worker_poller.py --team my-team --token <jt> --name bob \
   --executor-cmd "codex exec --last {prompt}" --workdir ~/atmcp-work
 ```
 
+## Windows
+Run it with the Python launcher; set env vars per shell:
+```powershell
+# PowerShell
+$env:ATMCP_URL="http://<host>:18000"; $env:ATMCP_TEAM="my-team"
+$env:ATMCP_TOKEN="<jt>"; $env:ATMCP_NAME="bob"
+py scripts\atmcp_worker_poller.py
+```
+```bat
+:: CMD
+py scripts\atmcp_worker_poller.py --url http://<host>:18000 --team my-team --token <jt> --name bob
+```
+- **`claude` as a `.cmd` shim is handled automatically.** npm installs `claude` as `claude.cmd`,
+  which a bare `subprocess` can't launch (WinError 2/193); the poller resolves it via PATHEXT and
+  runs it through `cmd /c` (a real `claude.exe` is used directly). So both install methods work.
+- **Custom `--executor-cmd` on Windows** is NOT cmd-wrapped (its prompt rides in argv, so shell-
+  wrapping would be an injection risk). Point it at a real `.exe`, or run the poller under **WSL**.
+- **Keep alive:** wrap as a service with **NSSM**, or a **Task Scheduler** task (trigger = at
+  log-on/startup, "restart on failure"); or `Start-Process py -ArgumentList "…" -WindowStyle Hidden`.
+
 ## Run several / keep alive
 - **Multiple workers:** one process per name (bob, alice…); each is serial and never claims another's directive.
 - **Keep alive:** the script loops forever and retries network errors; wrap it in `nohup … &` / tmux / systemd / pm2 to survive process exit.

@@ -78,6 +78,36 @@ def test_custom_cmd_appends_prompt_without_token():
     assert "hello" in cmd[-1]
 
 
+# ── Windows .cmd shim resolution ─────────────────────────────────────────────
+def test_win_wrap_cmd_shim_runs_via_cmd(monkeypatch):
+    monkeypatch.setattr(poller.os, "name", "nt")
+    monkeypatch.setattr(poller.shutil, "which",
+                        lambda n: r"C:\Users\me\AppData\Roaming\npm\claude.cmd")
+    out = poller._win_wrap(["claude", "-p", "--model", "opus"])
+    assert out[:2] == ["cmd", "/c"]
+    assert out[2].lower().endswith("claude.cmd")
+    assert out[3:] == ["-p", "--model", "opus"]  # flags preserved, in order
+
+
+def test_win_wrap_exe_used_by_full_path_no_shell(monkeypatch):
+    monkeypatch.setattr(poller.os, "name", "nt")
+    monkeypatch.setattr(poller.shutil, "which", lambda n: r"C:\Program Files\Claude\claude.exe")
+    out = poller._win_wrap(["claude", "-p"])
+    assert out[0].lower().endswith("claude.exe") and out[0] != "cmd"
+    assert out[1:] == ["-p"]
+
+
+def test_win_wrap_noop_on_posix(monkeypatch):
+    monkeypatch.setattr(poller.os, "name", "posix")
+    assert poller._win_wrap(["claude", "-p", "--model", "opus"]) == ["claude", "-p", "--model", "opus"]
+
+
+def test_win_wrap_missing_binary_left_for_clear_error(monkeypatch):
+    monkeypatch.setattr(poller.os, "name", "nt")
+    monkeypatch.setattr(poller.shutil, "which", lambda n: None)
+    assert poller._win_wrap(["claude", "-p"]) == ["claude", "-p"]  # subprocess raises "not found"
+
+
 # ── usage accounting + budget brake ──────────────────────────────────────────
 def test_extract_usage_pulls_tokens_and_cost():
     j = {
