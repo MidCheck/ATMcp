@@ -86,33 +86,85 @@ class Client:
         except Exception:
             pass
 
+    def report_usage(self, usage: dict, did: str | None = None) -> None:
+        try:
+            self._req("POST", f"/api/teams/{self.team}/agents/{self.name}/usage",
+                      {**usage, "directive_id": did})
+        except Exception:
+            pass
 
-# ── session state (per worker) ───────────────────────────────────────────────
+
+# ── per-worker state (session id + cumulative usage, in one JSON file) ────────
 def _state_path(args) -> str:
     safe = f"{args.team}__{args.name}".replace("/", "_")
     return os.path.join(os.path.expanduser(args.state_dir), f"{safe}.json")
 
 
+def _read_state(args) -> dict:
+    try:
+        with open(_state_path(args), encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _write_state(args, **updates) -> None:
+    """Merge-write so persisting the session id never clobbers the usage totals
+    (and vice-versa). Written atomically (temp file + os.replace) so a crash mid-write
+    can't truncate the file and silently reset the budget counters on restart."""
+    st = _read_state(args)
+    st.update(updates)
+    st.setdefault("team", args.team)
+    st.setdefault("name", args.name)
+    path = _state_path(args)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)  # atomic on POSIX and Windows
+    except Exception as e:  # noqa: BLE001
+        print(f"[atmcp] warn: could not persist state: {e}", file=sys.stderr, flush=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def load_session_id(args) -> str | None:
     if args.session_mode != "resume":
         return None
-    try:
-        with open(_state_path(args), encoding="utf-8") as f:
-            return json.load(f).get("session_id")
-    except Exception:
-        return None
+    return _read_state(args).get("session_id")
 
 
 def save_session_id(args, session_id: str | None) -> None:
     if not session_id or args.session_mode != "resume":
         return
-    path = _state_path(args)
+    _write_state(args, session_id=session_id)
+
+
+def load_usage_totals(args) -> tuple[float, int]:
+    st = _read_state(args)
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"session_id": session_id, "team": args.team, "name": args.name}, f)
-    except Exception as e:  # noqa: BLE001
-        print(f"[atmcp] warn: could not persist session id: {e}", file=sys.stderr, flush=True)
+        return float(st.get("spent_usd", 0.0) or 0.0), int(st.get("spent_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0, 0
+
+
+def save_usage_totals(args, spent_usd: float, spent_tokens: int) -> None:
+    _write_state(args, spent_usd=round(spent_usd, 6), spent_tokens=int(spent_tokens))
+
+
+def over_budget(args, spent_usd: float, spent_tokens: int) -> str | None:
+    """Return a human reason if a configured budget is reached, else None.
+    Budgets of 0 (the default) mean unlimited."""
+    if args.cost_budget and args.cost_budget > 0 and spent_usd >= args.cost_budget:
+        return f"cost ${spent_usd:.2f} ≥ budget ${args.cost_budget:.2f}"
+    if args.token_budget and args.token_budget > 0 and spent_tokens >= args.token_budget:
+        return f"tokens {spent_tokens:,} ≥ budget {args.token_budget:,}"
+    return None
 
 
 # ── command builders (argv lists — never shell strings, so no injection) ──────
@@ -141,12 +193,32 @@ def build_custom_cmd(template: str, prompt: str) -> list[str]:
     return parts + [prompt]
 
 
-def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, str, str | None]:
-    """Returns (ok, result_text, new_session_id)."""
+def _extract_usage(j: dict, model: str) -> dict | None:
+    """Pull the token/cost meter out of `claude -p --output-format json`. The data is
+    already in the response we parse for the session id, so capturing it is free."""
+    u = j.get("usage") or {}
+    usage = {
+        "model": j.get("model") or model,
+        "input_tokens": int(u.get("input_tokens") or 0),
+        "output_tokens": int(u.get("output_tokens") or 0),
+        "cache_read": int(u.get("cache_read_input_tokens") or 0),
+        "cache_creation": int(u.get("cache_creation_input_tokens") or 0),
+        "cost_usd": float(j.get("total_cost_usd") or 0.0),
+        "num_turns": int(j.get("num_turns") or 0),
+        "duration_ms": int(j.get("duration_ms") or 0),
+    }
+    # Only report if the executor actually gave us numbers.
+    if any(usage[k] for k in ("input_tokens", "output_tokens", "cost_usd")):
+        return usage
+    return None
+
+
+def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, str, str | None, dict | None]:
+    """Returns (ok, result_text, new_session_id, usage_or_None)."""
     prompt = EXEC_PROMPT.format(instruction=instruction)
     if args.dry_run:
         mode = f"resume {session_id[-6:]}" if session_id else "new session"
-        return True, f"[dry-run] would execute ({mode}) via {args.executor_cmd or 'claude'}: {instruction[:120]}", session_id
+        return True, f"[dry-run] would execute ({mode}) via {args.executor_cmd or 'claude'}: {instruction[:120]}", session_id, None
 
     cwd = None
     run_kwargs: dict = {}
@@ -163,24 +235,24 @@ def run_executor(args, instruction: str, session_id: str | None) -> tuple[bool, 
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=args.executor_timeout, cwd=cwd, **run_kwargs)
     except subprocess.TimeoutExpired:
-        return False, "executor timed out", session_id
+        return False, "executor timed out", session_id, None
     except FileNotFoundError:
-        return False, f"executor not found: {cmd[0]}", session_id
+        return False, f"executor not found: {cmd[0]}", session_id, None
 
     out = (p.stdout or "").strip()
-    # Claude --output-format json: parse {result, session_id, is_error}.
+    # Claude --output-format json: parse {result, session_id, is_error, usage, total_cost_usd}.
     if not args.executor_cmd:
         try:
             j = json.loads(out)
             result = (j.get("result") or "").strip()
             new_sid = j.get("session_id") or session_id
             ok = (p.returncode == 0) and not j.get("is_error", False)
-            return ok, (result or out)[:8000], new_sid
+            return ok, (result or out)[:8000], new_sid, _extract_usage(j, args.model)
         except Exception:
             pass  # not JSON — fall through to raw handling
     if p.returncode != 0:
-        return False, (out + "\n" + (p.stderr or "")).strip()[:8000] or f"exit {p.returncode}", session_id
-    return True, out[:8000], session_id
+        return False, (out + "\n" + (p.stderr or "")).strip()[:8000] or f"exit {p.returncode}", session_id, None
+    return True, out[:8000], session_id, None
 
 
 def main() -> None:
@@ -205,6 +277,13 @@ def main() -> None:
                          "--model/--resume/--output-format/--allowedTools here (poller manages those).")
     ap.add_argument("--resume-session", default=os.environ.get("ATMCP_RESUME_SESSION"),
                     help="resume an EXISTING claude session id at startup (seeds this worker's session)")
+    ap.add_argument("--cost-budget", type=float, default=float(os.environ.get("ATMCP_COST_BUDGET", "0") or 0),
+                    help="USD budget; when cumulative cost reaches it the worker pauses (stops "
+                         "claiming). 0 = unlimited. Tracked across restarts in --state-dir.")
+    ap.add_argument("--token-budget", type=int, default=int(os.environ.get("ATMCP_TOKEN_BUDGET", "0") or 0),
+                    help="total (input+output) token budget; pauses when reached. 0 = unlimited.")
+    ap.add_argument("--reset-usage", action="store_true",
+                    help="zero this worker's cumulative cost/token counters at startup")
     ap.add_argument("--wait-ms", type=int, default=30000, help="inbox long-poll window")
     ap.add_argument("--idle-sleep", type=float, default=1.0)
     ap.add_argument("--executor-timeout", type=float, default=1800.0)
@@ -216,12 +295,34 @@ def main() -> None:
     if args.resume_session and not session_id:
         session_id = args.resume_session  # seed from an existing claude session
         save_session_id(args, session_id)
+    if args.reset_usage:
+        save_usage_totals(args, 0.0, 0)
+    spent_usd, spent_tokens = load_usage_totals(args)
+    budget_desc = ""
+    if args.cost_budget and args.cost_budget > 0:
+        budget_desc += f" cost-budget=${args.cost_budget:.2f}"
+    if args.token_budget and args.token_budget > 0:
+        budget_desc += f" token-budget={args.token_budget:,}"
     print(f"[atmcp] poller '{args.name}' team='{args.team}' executor={args.executor_cmd or ('claude --model ' + args.model)} "
           f"session-mode={args.session_mode}{' (resuming ' + session_id[-6:] + ')' if session_id else ''}"
+          f"{budget_desc}{f' spent=${spent_usd:.2f}/{spent_tokens:,}tok' if (spent_usd or spent_tokens) else ''}"
           f"{' (dry-run)' if args.dry_run else ''}. Idle polling is token-free. Ctrl-C to stop.", flush=True)
 
+    paused = False
     while True:
         try:
+            reason = over_budget(args, spent_usd, spent_tokens)
+            if reason:
+                if not paused:
+                    paused = True
+                    msg = (f"⏸ budget reached ({reason}); pausing — not claiming new directives. "
+                           f"Raise --cost-budget/--token-budget or pass --reset-usage to resume.")
+                    c.append_output(msg)
+                    print(f"[atmcp] {msg}", file=sys.stderr, flush=True)
+                c.heartbeat(f"paused: budget reached ({reason})")
+                time.sleep(max(args.idle_sleep, 5.0))
+                continue
+            paused = False
             c.heartbeat("polling")
             directives = c.inbox(args.wait_ms)
             if not directives:
@@ -235,16 +336,25 @@ def main() -> None:
             c.heartbeat(f"executing: {instruction[:40]}")
             c.append_output(f"▶ started: {instruction[:200]}", did)
 
-            ok, result, new_sid = run_executor(args, instruction, session_id)
+            ok, result, new_sid, usage = run_executor(args, instruction, session_id)
             if new_sid and new_sid != session_id:
                 session_id = new_sid
                 save_session_id(args, session_id)
+            if usage:
+                c.report_usage(usage, did)
+                spent_usd += usage["cost_usd"]
+                spent_tokens += usage["input_tokens"] + usage["output_tokens"]
+                save_usage_totals(args, spent_usd, spent_tokens)
 
             c.append_output(result, did)
             summary = (result.splitlines()[0] if result else "")[:200]
             c.report(did, "done" if ok else "failed", summary, result)
+            usage_note = ""
+            if usage:
+                usage_note = (f" · {usage['input_tokens'] + usage['output_tokens']:,}tok "
+                              f"${usage['cost_usd']:.3f} (cum ${spent_usd:.2f})")
             print(f"[atmcp] reported {did[-6:]}: {'done' if ok else 'failed'}"
-                  f"{' · session ' + session_id[-6:] if session_id else ''}", flush=True)
+                  f"{' · session ' + session_id[-6:] if session_id else ''}{usage_note}", flush=True)
         except urllib.error.HTTPError as e:
             print(f"[atmcp] HTTP {e.code}: {e.read().decode(errors='replace')[:200]}", file=sys.stderr, flush=True)
             time.sleep(3)

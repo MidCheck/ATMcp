@@ -15,6 +15,7 @@ from atmcp import db, events, idempotency, redis_bus
 from atmcp.config import settings
 from atmcp.ids import now_ms
 from atmcp.services import output as output_svc
+from atmcp.services import usage as usage_svc
 
 log = logging.getLogger("atmcp.reaper")
 
@@ -79,6 +80,7 @@ async def _loop() -> None:
             await sweep_once()
             await idempotency.prune_expired(settings.idem_ttl_s * 1000)
             await output_svc.prune_expired(settings.output_retention_s * 1000)
+            await usage_svc.prune_expired(settings.usage_retention_s * 1000)
         except Exception as exc:  # noqa: BLE001
             log.warning("reaper sweep error: %s", exc)
         try:

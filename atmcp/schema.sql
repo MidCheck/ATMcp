@@ -210,6 +210,28 @@ CREATE TABLE IF NOT EXISTS agent_output (
 );
 CREATE INDEX IF NOT EXISTS idx_output_tail ON agent_output(team_id, agent_id, id);
 
+-- ── Usage: per-execution token/cost accounting (append-only meter) ──────────
+-- One row per worker model run (parsed from `claude -p --output-format json`'s
+-- usage + total_cost_usd). Powers the dashboard token meters, rolling-window
+-- views, and budget brakes. Append-only; old rows pruned by the reaper.
+CREATE TABLE IF NOT EXISTS usage_events (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id        TEXT NOT NULL,
+  agent_id       TEXT NOT NULL,
+  directive_id   TEXT,
+  model          TEXT,
+  input_tokens   INTEGER NOT NULL DEFAULT 0,
+  output_tokens  INTEGER NOT NULL DEFAULT 0,
+  cache_read     INTEGER NOT NULL DEFAULT 0,
+  cache_creation INTEGER NOT NULL DEFAULT 0,
+  cost_usd       REAL    NOT NULL DEFAULT 0,
+  num_turns      INTEGER NOT NULL DEFAULT 0,
+  duration_ms    INTEGER NOT NULL DEFAULT 0,
+  ts             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_team_ts    ON usage_events(team_id, ts);
+CREATE INDEX IF NOT EXISTS idx_usage_team_agent ON usage_events(team_id, agent_id, ts);
+
 -- ── Events: monotonic activity log (audit + replay + dashboard feed) ─────────
 CREATE TABLE IF NOT EXISTS events (
   event_id     INTEGER PRIMARY KEY AUTOINCREMENT,

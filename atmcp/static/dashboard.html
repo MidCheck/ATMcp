@@ -83,6 +83,15 @@
     .know:last-child { border: none; }
     .know .tags { color: var(--accent); font-size: 11px; }
     .know .by { color: var(--muted); font-size: 11px; }
+    .usage-summary { font-size: 11.5px; margin-top: 8px; line-height: 1.7; }
+    .usage-summary b { color: var(--text); }
+    .agent .sub .cost { color: var(--green); }
+    table.usage { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    table.usage th, table.usage td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    table.usage th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
+    table.usage td.name, table.usage th.name { text-align: left; }
+    table.usage tr.total td { border-top: 2px solid var(--border); font-weight: 600; color: var(--text); }
+    table.usage td.cost { color: var(--green); }
     .empty { color: var(--muted); font-style: italic; padding: 8px 2px; }
     code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
     .setup { padding: 40px; max-width: 680px; margin: 0 auto; }
@@ -151,6 +160,7 @@
           <div class="goalbar"><div id="goalFill" style="width:0%"></div></div>
           <div><b id="goalPct">0%</b> <span class="muted" id="goalDetail"></span></div>
           <div class="stat-row" id="statRow"></div>
+          <div id="usageSummary" class="usage-summary muted"></div>
         </div>
         <div class="panel fill">
           <h2>Agents <span class="muted" style="text-transform:none">— click to inspect</span></h2>
@@ -164,12 +174,14 @@
           <button class="tab active" id="tabbtn-board" onclick="showTab('board')">Task board</button>
           <button class="tab" id="tabbtn-activity" onclick="showTab('activity')">Activity</button>
           <button class="tab" id="tabbtn-knowledge" onclick="showTab('knowledge')">Knowledge</button>
+          <button class="tab" id="tabbtn-usage" onclick="showTab('usage')">Tokens</button>
           <button class="tab" id="tabbtn-detail" style="display:none" onclick="showTab('detail')">Agent</button>
         </div>
         <div class="panel fill" style="border-top-left-radius:0">
           <div class="tabpanel scrollbody" id="tab-board"><div class="cols col-board" id="board"></div></div>
           <div class="tabpanel scrollbody" id="tab-activity" style="display:none"><div id="feed"></div></div>
           <div class="tabpanel scrollbody" id="tab-knowledge" style="display:none"><div id="knowledge"></div></div>
+          <div class="tabpanel scrollbody" id="tab-usage" style="display:none"><div id="usage"></div></div>
           <div class="tabpanel scrollbody" id="tab-detail" style="display:none">
             <div class="detail-head">
               <h2 id="detailName"></h2>

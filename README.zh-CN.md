@@ -153,8 +153,9 @@ python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
 打开 `http://<host>:8000/dashboard?team=<队名>` —— 整页满高的**三栏**布局(页面本身不滚动,每栏各自
 内部滚动):
 - **左栏**:目标进度 + 统计 + 实时 agent 名册(绿/黄/灰 在线徽标)。
-- **中栏(标签页)**:任务看板 · 活动流 · 知识 —— **点击某个 agent** 会就地打开一个 **Agent** 标签页,
-  里面是它的指令、任务与实时输出(不用再往下滚)。
+- **中栏(标签页)**:任务看板 · 活动流 · 知识 · **Tokens**(各 agent 的 token / 成本计量,带 5 小时 /
+  7 天滚动窗口)—— **点击某个 agent** 会就地打开一个 **Agent** 标签页,里面是它的指令、任务与实时
+  输出(不用再往下滚)。
 - **右栏(常驻)**:**团队控制台** —— 输入 `/team` 命令(伪模型对话),输入框固定在底部,命令结果与
   实时指令事件流入对话区。
 
@@ -178,11 +179,22 @@ python scripts/atmcp_worker_poller.py --url http://<host>:8000 \
 `{stale_token}`、`{not_joined}`),而非报错。`sync(since_event_id, wait_ms)` 会长轮询等待下一个事件,
 让 Agent 能尽快响应。
 
+## Token / 成本监测(让限额不再悄悄耗尽)
+
+`claude -p --output-format json` 的返回里本就带 `usage` + `total_cost_usd`,所以省 token 的 poller
+顺手就能捕获并上报(`POST …/agents/{agent}/usage`)。服务端用一张 append-only 的 `usage_events`
+计量表记账,前端 **Tokens** 标签页展示各 agent 的输入/输出/缓存 token、成本,以及 **5 小时 / 7 天滚动
+窗口**(对齐 Claude 的限流窗口),实时看出每个 agent 距离限额还有多少。
+
+poller 还提供**硬性预算刹车**:`--cost-budget <USD>` / `--token-budget <N>`(0 = 不限;累计值按 worker
+持久化在 `--state-dir`,重启不丢)。一旦达到预算,worker 就**停止 claim 指令**,前端显示"paused:
+budget reached"——后台跑再久也不会无声烧穿限额。调高预算或加 `--reset-usage` 即可恢复。
+
 ## 配置
 
 见 `.env.example`。要点:`ATMCP_ADMIN_TOKEN`、`ATMCP_SQLITE_PATH`、`ATMCP_REDIS_URL`、
 `ATMCP_PUBLIC_URL`、心跳 TTL/间隔(`30`/`10s`)、租约 TTL(`90s`)、reaper 间隔(`5s`)、
-`ATMCP_TASK_MAX_ATTEMPTS`、`ATMCP_DASHBOARD_AUTH`。
+`ATMCP_TASK_MAX_ATTEMPTS`、`ATMCP_DASHBOARD_AUTH`、用量保留(`ATMCP_USAGE_RETENTION_S`,30 天)。
 
 ## 失效模型(摘要)
 

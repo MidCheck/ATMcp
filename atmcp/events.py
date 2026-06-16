@@ -31,6 +31,7 @@ DIRECTIVE_CLAIMED = "directive_claimed"
 DIRECTIVE_DONE = "directive_done"
 DIRECTIVE_FAILED = "directive_failed"
 DIRECTIVE_CANCELED = "directive_canceled"
+USAGE_REPORTED = "usage_reported"
 
 
 async def append(

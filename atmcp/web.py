@@ -25,6 +25,7 @@ from atmcp.services import output as output_svc
 from atmcp.services import presence as presence_svc
 from atmcp.services import status as status_svc
 from atmcp.services import tasks as tasks_svc
+from atmcp.services import usage as usage_svc
 
 log = logging.getLogger("atmcp.web")
 STATIC_DIR = Path(__file__).parent / "static"
@@ -95,6 +96,7 @@ async def _snapshot(team_id: str, name: str) -> dict[str, Any]:
         "FROM knowledge_current WHERE team_id=? AND present=1 ORDER BY last_seen_at DESC LIMIT 50",
         (team_id,),
     )
+    usage = await usage_svc.team_usage(team_id)
     return {
         "team": name,
         "team_id": team_id,
@@ -104,6 +106,7 @@ async def _snapshot(team_id: str, name: str) -> dict[str, Any]:
         "tasks": board,
         "goals": [dict(g) for g in goals],
         "knowledge": [dict(k) for k in knowledge],
+        "usage": usage,
         "events": feed,
         "head_event_id": st["head_event_id"],
     }
@@ -160,6 +163,14 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="unknown team")
         _check_dashboard(team, token)
         return await status_svc.get_team_status(team["team_id"])
+
+    @app.get("/api/teams/{team_name}/usage")
+    async def team_usage(team_name: str, token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        return await usage_svc.team_usage(team["team_id"])
 
     # ── dashboard console + agent drill-down ───────────────────────────────
     @app.post("/api/teams/{team_name}/console/command")
@@ -290,6 +301,27 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=400, detail="text required")
         return await output_svc.append_output(
             team["team_id"], agent_id, text, (body or {}).get("directive_id"), source="hook"
+        )
+
+    @app.post("/api/teams/{team_name}/agents/{agent_ref}/usage")
+    async def rest_usage(
+        team_name: str,
+        agent_ref: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """A worker reports one model run's token/cost usage (parsed from
+        `claude -p --output-format json`). Auth = the team join token."""
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        agent_id = await identity_svc.resolve_agent_ref(team["team_id"], agent_ref)
+        if agent_id is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        return await usage_svc.record_usage(
+            team["team_id"], agent_id, b.get("directive_id"), b.get("model"),
+            b.get("input_tokens"), b.get("output_tokens"), b.get("cache_read"),
+            b.get("cache_creation"), b.get("cost_usd"), b.get("num_turns"), b.get("duration_ms"),
         )
 
     # ── worker REST API: drive the directive loop WITHOUT an LLM (zero idle tokens) ──

@@ -101,8 +101,9 @@ If your client can't set headers, the agent passes the token to `join_team` dire
 Open `http://<host>/dashboard?team=<team>` — a full-height **three-column** app (no page
 scrolling; each column scrolls on its own):
 - **Left:** goal progress + stats and the live agent roster (presence green/amber/grey).
-- **Center (tabbed):** Task board · Activity feed · Knowledge — and **clicking an agent** opens
-  an **Agent** tab right there with its directives, tasks, and live output (no scrolling down).
+- **Center (tabbed):** Task board · Activity feed · Knowledge · **Tokens** (per-agent token & cost
+  meter with rolling 5h/7d windows) — and **clicking an agent** opens an **Agent** tab right there
+  with its directives, tasks, and live output (no scrolling down).
 - **Right (always visible):** the **Team console** — type `/team` commands (a "pseudo-model"
   chat) with the input pinned at the bottom; results and live directive events stream in.
 
@@ -127,11 +128,26 @@ Every mutating tool accepts an optional `idem_key` (idempotency). Expected condi
 returned as data (`{conflict}`, `{taken_by}`, `{stale_token}`, `{not_joined}`), not errors.
 `sync(since_event_id, wait_ms)` long-polls for the next event so agents can react quickly.
 
+## Token & cost monitoring (so quota never runs out silently)
+
+`claude -p --output-format json` already returns a `usage` + `total_cost_usd` block, so the
+token-free poller captures it for free and reports it (`POST …/agents/{agent}/usage`). The server
+keeps an append-only `usage_events` meter and the dashboard **Tokens** tab shows per-agent
+in/out/cache tokens, cost, and **rolling 5h/7d windows** (mirroring Claude's rate-limit windows) so
+you can see how close each agent is to its limit in real time.
+
+The poller also enforces a **hard budget brake**: `--cost-budget <USD>` / `--token-budget <N>`
+(0 = unlimited; cumulative totals persist per worker in `--state-dir` across restarts). When the
+budget is reached the worker **stops claiming directives** and shows "paused: budget reached" on
+the dashboard — so a background fleet can't burn through your quota unnoticed. Raise the budget or
+pass `--reset-usage` to resume.
+
 ## Configuration
 
 See `.env.example`. Highlights: `ATMCP_ADMIN_TOKEN`, `ATMCP_SQLITE_PATH`, `ATMCP_REDIS_URL`,
 `ATMCP_PUBLIC_URL`, heartbeat TTL/interval (`30`/`10s`), lease TTL (`90s`), reaper interval
-(`5s`), `ATMCP_TASK_MAX_ATTEMPTS`, `ATMCP_DASHBOARD_AUTH`.
+(`5s`), `ATMCP_TASK_MAX_ATTEMPTS`, `ATMCP_DASHBOARD_AUTH`, usage retention
+(`ATMCP_USAGE_RETENTION_S`, 30d).
 
 ## Failure model (summary)
 

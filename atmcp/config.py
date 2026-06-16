@@ -50,5 +50,9 @@ class Settings:
     output_retention_s: int = _int("ATMCP_OUTPUT_RETENTION_S", 7200)  # prune older chunks
     output_max_chunk: int = _int("ATMCP_OUTPUT_MAX_CHUNK", 8192)      # truncate huge chunks
 
+    # Token/cost usage accounting (dashboard meters + rolling windows). Retain long
+    # enough to back the widest rolling window; default 30 days.
+    usage_retention_s: int = _int("ATMCP_USAGE_RETENTION_S", 2592000)
+
 
 settings = Settings()

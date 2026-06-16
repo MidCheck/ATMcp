@@ -67,3 +67,51 @@ def test_custom_cmd_appends_prompt_without_token():
     cmd = poller.build_custom_cmd("mytool run", "hello")
     assert cmd[:2] == ["mytool", "run"]
     assert "hello" in cmd[-1]
+
+
+# ── usage accounting + budget brake ──────────────────────────────────────────
+def test_extract_usage_pulls_tokens_and_cost():
+    j = {
+        "result": "done", "session_id": "s1", "num_turns": 4, "duration_ms": 8000,
+        "total_cost_usd": 0.37,
+        "usage": {"input_tokens": 1200, "output_tokens": 450,
+                  "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 300},
+        "model": "claude-opus-4-8",
+    }
+    u = poller._extract_usage(j, "opus")
+    assert u["input_tokens"] == 1200 and u["output_tokens"] == 450
+    assert u["cache_read"] == 9000 and u["cache_creation"] == 300
+    assert u["cost_usd"] == 0.37 and u["num_turns"] == 4
+    assert u["model"] == "claude-opus-4-8"  # prefers the model the CLI reports
+
+
+def test_extract_usage_none_when_empty():
+    assert poller._extract_usage({"result": "x", "session_id": "s"}, "opus") is None
+
+
+def test_over_budget_cost_and_tokens():
+    cost_only = SimpleNamespace(cost_budget=1.0, token_budget=0)
+    assert poller.over_budget(cost_only, 0.5, 10_000) is None
+    assert poller.over_budget(cost_only, 1.0, 0) is not None      # at the cap → paused
+    tok_only = SimpleNamespace(cost_budget=0, token_budget=5000)
+    assert poller.over_budget(tok_only, 99.0, 4999) is None
+    assert poller.over_budget(tok_only, 0, 5000) is not None
+    unlimited = SimpleNamespace(cost_budget=0, token_budget=0)
+    assert poller.over_budget(unlimited, 1e9, 1_000_000_000) is None
+
+
+def test_usage_totals_persist_and_merge_with_session(tmp_path):
+    args = SimpleNamespace(team="t", name="bob", state_dir=str(tmp_path), session_mode="resume")
+    # session id and usage totals share one file without clobbering each other
+    poller.save_session_id(args, "sess-xyz")
+    poller.save_usage_totals(args, 1.23, 4567)
+    poller.save_session_id(args, "sess-xyz")  # re-save session must not wipe usage
+    assert poller.load_session_id(args) == "sess-xyz"
+    assert poller.load_usage_totals(args) == (1.23, 4567)
+
+
+def test_reset_usage_zeroes_totals(tmp_path):
+    args = SimpleNamespace(team="t", name="bob", state_dir=str(tmp_path), session_mode="resume")
+    poller.save_usage_totals(args, 9.99, 1000)
+    poller.save_usage_totals(args, 0.0, 0)
+    assert poller.load_usage_totals(args) == (0.0, 0)

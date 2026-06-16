@@ -59,6 +59,14 @@ Don't put `--model / --resume / --output-format / --allowedTools` in `--claude-a
 sets those via `--model`, the session logic, and `--allowed-tools`). To pick up an *existing*
 Claude session at startup, use `--resume-session <id>`.
 
+**Token & cost.** The poller parses `claude -p --output-format json`'s `usage`/`total_cost_usd`
+(free — it already reads that JSON for the session id) and reports it, so the dashboard **Tokens**
+tab shows each agent's tokens/cost + rolling 5h/7d windows. Set a hard brake with
+`--cost-budget <USD>` and/or `--token-budget <N>` (0 = unlimited): when cumulative spend (persisted
+per worker in `--state-dir`, surviving restarts) reaches it, the worker **stops claiming** and shows
+"paused: budget reached". Raise the budget or pass `--reset-usage` to resume. Custom `--executor-cmd`
+tools don't emit that JSON, so they report no token data.
+
 **Latency.** The inbox long-poll returns the *instant* a directive is sent (≈ms) — so don't use
 `/loop` (1-minute cron granularity). End-to-end ≈ executor spin-up + resume load (a few seconds).
 Process one directive at a time (the poller is serial), so a single worker never double-runs.

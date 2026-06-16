@@ -57,6 +57,18 @@ function fmtAgo(ts) {
   return Math.round(s / 3600) + "h ago";
 }
 
+function fmtNum(n) {
+  n = Number(n || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+function fmtUsd(n) {
+  n = Number(n || 0);
+  return "$" + (n < 1 ? n.toFixed(3) : n.toFixed(2));
+}
+
 function render(s) {
   el("teamName").textContent = s.team;
   const pct = s.rollup ? s.rollup.progress_pct : 0;
@@ -73,16 +85,19 @@ function render(s) {
   ];
   el("statRow").innerHTML = tiles.map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
 
+  const usageBy = (s.usage && s.usage.agents) || {};
   el("agents").innerHTML = s.agents.length === 0
     ? '<div class="empty">no agents yet</div>'
     : s.agents.map((a) => {
         const prog = a.progress_pct || 0;
         const selCls = selAgent && selAgent.id === a.agent_id ? " sel" : "";
+        const u = usageBy[a.agent_id];
+        const cost = u ? ` · <span class="cost">${fmtUsd(u.cost_usd)}</span> · ${fmtNum(u.input_tokens + u.output_tokens)} tok` : "";
         return `<div class="agent${selCls}" data-agent-id="${esc(a.agent_id)}" data-agent-name="${esc(a.display_name)}">
           <div class="dot ${esc(a.presence)}" title="${esc(a.presence)}"></div>
           <div class="meta">
             <div class="name">${esc(a.display_name)}</div>
-            <div class="sub">${esc(a.status_summary || "—")}${a.current_task_id ? " · task " + esc(a.current_task_id.slice(-6)) : ""} · ${fmtAgo(a.last_seen)}</div>
+            <div class="sub">${esc(a.status_summary || "—")}${a.current_task_id ? " · task " + esc(a.current_task_id.slice(-6)) : ""} · ${fmtAgo(a.last_seen)}${cost}</div>
             <div class="mini"><div style="width:${prog}%"></div></div>
           </div>
         </div>`;
@@ -109,7 +124,48 @@ function render(s) {
           <div class="by">by ${esc(k.first_author.slice(-6))}${k.contributor_count > 1 ? " +" + (k.contributor_count - 1) : ""}</div></div>`;
       }).join("");
 
+  renderUsage(s);
   if (s.events) renderFeed(s.events);
+}
+
+function renderUsage(s) {
+  const u = s.usage || { agents: {}, team: {} };
+  const t = u.team || {};
+  const w5 = t.window_5h || { cost_usd: 0, tokens: 0 };
+  const w7 = t.window_7d || { cost_usd: 0, tokens: 0 };
+  const totalTok = (t.input_tokens || 0) + (t.output_tokens || 0);
+  el("usageSummary").innerHTML =
+    `Tokens <b>${fmtNum(totalTok)}</b> · cost <b>${fmtUsd(t.cost_usd)}</b><br>` +
+    `last 5h <b>${fmtUsd(w5.cost_usd)}</b> / ${fmtNum(w5.tokens)} · ` +
+    `last 7d <b>${fmtUsd(w7.cost_usd)}</b> / ${fmtNum(w7.tokens)}`;
+
+  // Map agent_id → display_name for the table.
+  const names = {};
+  (s.agents || []).forEach((a) => (names[a.agent_id] = a.display_name));
+  const rows = Object.entries(u.agents || {})
+    .sort((a, b) => (b[1].cost_usd || 0) - (a[1].cost_usd || 0));
+  const head = `<tr><th class="name">Agent</th><th>In</th><th>Out</th><th>Cache</th>
+    <th>Cost</th><th>5h</th><th>7d</th><th>Runs</th></tr>`;
+  const body = rows.length
+    ? rows.map(([aid, a]) => `<tr>
+        <td class="name">${esc(names[aid] || aid.slice(-6))}</td>
+        <td>${fmtNum(a.input_tokens)}</td>
+        <td>${fmtNum(a.output_tokens)}</td>
+        <td>${fmtNum(a.cache_read + a.cache_creation)}</td>
+        <td class="cost">${fmtUsd(a.cost_usd)}</td>
+        <td>${fmtUsd((a.window_5h || {}).cost_usd)}</td>
+        <td>${fmtUsd((a.window_7d || {}).cost_usd)}</td>
+        <td>${a.runs || 0}</td>
+      </tr>`).join("")
+    : `<tr><td class="name empty" colspan="8">no usage reported yet — workers report tokens as they run</td></tr>`;
+  const total = rows.length ? `<tr class="total">
+      <td class="name">team</td>
+      <td>${fmtNum(t.input_tokens)}</td><td>${fmtNum(t.output_tokens)}</td>
+      <td>${fmtNum((t.cache_read || 0) + (t.cache_creation || 0))}</td>
+      <td class="cost">${fmtUsd(t.cost_usd)}</td>
+      <td>${fmtUsd(w5.cost_usd)}</td><td>${fmtUsd(w7.cost_usd)}</td>
+      <td>${t.runs || 0}</td></tr>` : "";
+  el("usage").innerHTML = `<table class="usage"><thead>${head}</thead><tbody>${body}${total}</tbody></table>`;
 }
 
 function renderFeed(events) {
@@ -130,7 +186,7 @@ function prependEvent(e) {
 }
 
 // ── Center tabs ──────────────────────────────────────────────────────────────
-const TABS = ["board", "activity", "knowledge", "detail"];
+const TABS = ["board", "activity", "knowledge", "usage", "detail"];
 function showTab(name) {
   TABS.forEach((t) => {
     const panel = el("tab-" + t);
