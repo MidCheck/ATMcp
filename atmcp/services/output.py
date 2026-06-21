@@ -35,11 +35,12 @@ async def append_output(
             )
             if not ref:
                 directive_id = None
-        # Same for the session tag: keep only a real session in this team.
+        # Keep the session tag only if it's a real session in this team that belongs to the
+        # writing agent — so a worker can't inject text into another agent's thread.
         if session_id is not None:
             ref = await tx.fetchval(
-                "SELECT 1 FROM sessions WHERE team_id=? AND session_id=?",
-                (team_id, session_id),
+                "SELECT 1 FROM sessions WHERE team_id=? AND session_id=? AND agent_id=?",
+                (team_id, session_id, agent_id),
             )
             if not ref:
                 session_id = None

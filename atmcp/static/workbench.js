@@ -11,6 +11,7 @@ let sessByAgent = {};        // agent_id -> [sessions]
 let openAgents = {};         // agent_id -> bool (tree expansion)
 let current = null;          // selected session {session_id, agent_id, title}
 let detailHead = 0;          // last output seq rendered
+let selectToken = 0;         // guards against races when switching sessions mid-load
 let ws = null, refreshTimer = null;
 let lastMsgEl = null, lastRole = null;
 
@@ -121,20 +122,30 @@ function addEvt(text) {
   lastRole = null; lastMsgEl = null; t.scrollTop = t.scrollHeight;
 }
 
+function appendAgentChunk(c) {
+  if (c.seq > detailHead) {
+    detailHead = c.seq;
+    if (!String(c.text).startsWith("▶ ")) appendMsg("agent", c.text);
+  }
+}
+
 async function selectSession(sid, aid) {
+  const mine = ++selectToken;                  // any later select supersedes this load
   const agent = agents.find((a) => a.agent_id === aid);
   current = { session_id: sid, agent_id: aid, title: "" };
+  detailHead = Number.MAX_SAFE_INTEGER;        // ignore live frames until the transcript is loaded
   document.querySelectorAll(".sess").forEach((c) => c.classList.toggle("sel", c.dataset.sid === sid));
   resetTranscript();
   el("input").disabled = false; el("sendBtn").disabled = false;
   el("renameBtn").style.display = ""; el("archiveBtn").style.display = "";
   try {
     const r = await fetch(withToken(api("/sessions/" + encodeURIComponent(sid))));
+    if (mine !== selectToken) return;          // user switched away during the fetch
     if (!r.ok) { addEvt("could not load session"); return; }
     const d = await r.json();
+    if (mine !== selectToken) return;
     current.title = d.session.title;
     el("crumb").innerHTML = `${esc(agent ? agent.display_name : "")} <span class="mut">/</span> ${esc(d.session.title)}`;
-    detailHead = d.head_seq || 0;
     // merge user messages (directives) + output by timestamp into a flowing transcript
     const items = [];
     (d.directives || []).forEach((x) => items.push({ ts: x.created_at, role: "you", text: x.instruction }));
@@ -142,6 +153,11 @@ async function selectSession(sid, aid) {
     items.sort((a, b) => (a.ts - b.ts) || ((a.seq || 0) - (b.seq || 0)));
     items.forEach((it) => { if (!(it.role === "agent" && it.text.startsWith("▶ "))) appendMsg(it.role, it.text); });
     if (!items.length) addEvt("new session — say something to " + (agent ? agent.display_name : "the agent"));
+    detailHead = d.head_seq || 0;              // now live frames beyond this flow in
+    // catch up anything produced during the load gap, then let the WS take over
+    const cu = await fetch(withToken(api("/sessions/" + encodeURIComponent(sid) + "/output?since_seq=" + detailHead)));
+    if (mine !== selectToken) return;
+    if (cu.ok) (await cu.json()).chunks.forEach(appendAgentChunk);
   } catch (e) { addEvt("load failed"); }
 }
 
@@ -230,10 +246,7 @@ function connectWS() {
   ws.onmessage = (m) => {
     const f = JSON.parse(m.data);
     if (f.type === "output") {
-      if (current && f.session_id === current.session_id && (f.seq || 0) > detailHead) {
-        detailHead = f.seq;
-        if (!String(f.text).startsWith("▶ ")) appendMsg("agent", f.text);
-      }
+      if (current && f.session_id === current.session_id) appendAgentChunk(f);
       return;
     }
     if (f.type === "presence") { scheduleTree(); return; }

@@ -226,15 +226,21 @@ def ensure_worktree(args, session_id: str) -> str | None:
         return path
     os.makedirs(root, exist_ok=True)
     if os.path.isdir(os.path.join(base, ".git")):
-        branch = f"atmcp/{session_id[:8]}"
+        # Detached worktree (no branch) avoids branch-name collisions entirely; prune first
+        # so a stale registration (dir deleted out from under git) doesn't block the add.
         try:
-            subprocess.run(["git", "-C", base, "worktree", "add", "-b", branch, path, "HEAD"],
+            subprocess.run(["git", "-C", base, "worktree", "prune"], capture_output=True, text=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            subprocess.run(["git", "-C", base, "worktree", "add", "--detach", path, "HEAD"],
                            check=True, capture_output=True, text=True)
             return path
-        except subprocess.CalledProcessError as e:  # branch exists / dirty — fall back
-            print(f"[atmcp] worktree add failed ({e.stderr.strip()[:120]}); using base repo",
-                  file=sys.stderr, flush=True)
-            return base
+        except subprocess.CalledProcessError as e:
+            # NEVER fall back to the shared base repo (concurrent acceptEdits would clobber it);
+            # use an isolated empty dir instead — degraded (no repo files) but safe.
+            print(f"[atmcp] worktree add failed ({(e.stderr or '').strip()[:120]}); "
+                  f"using isolated dir", file=sys.stderr, flush=True)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -264,14 +270,35 @@ async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asynci
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=cwd,
+            limit=8 * 1024 * 1024,   # stream-json `result` lines can exceed the 64KiB default
         )
     except FileNotFoundError:
         await c.report(did, "failed", "executor not found", f"not found: {cmd[0]}")
         return
 
-    proc.stdin.write(prompt.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
+    # Drain stderr concurrently so a full stderr pipe can never deadlock the stdout reader.
+    stderr_chunks: list[str] = []
+
+    async def _drain_stderr():
+        try:
+            async for sline in proc.stderr:
+                stderr_chunks.append(sline.decode(errors="replace"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+
+    # Feed the prompt; tolerate a child that exited / closed stdin early (e.g. stale --resume).
+    try:
+        proc.stdin.write(prompt.encode())
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     new_cli_sid = cli_sid
     result_obj: dict | None = None
@@ -285,33 +312,37 @@ async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asynci
             await c.append_output("".join(buf), session_id, did)
             buf, buf_len = [], 0
 
-    async for raw in proc.stdout:
-        line = raw.decode(errors="replace").strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        kind, val = classify_event(obj)
-        if kind == "init" and val:
-            new_cli_sid = val
-        elif kind == "delta" and val:
-            got_delta = True
-            buf.append(val)
-            buf_len += len(val)
-            if buf_len >= 200:
+    try:
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            kind, val = classify_event(obj)
+            if kind == "init" and val:
+                new_cli_sid = val
+            elif kind == "delta" and val:
+                got_delta = True
+                buf.append(val)
+                buf_len += len(val)
+                if buf_len >= 200:
+                    await flush()
+            elif kind == "assistant" and val and not got_delta:
+                # no token deltas from this CLI/model → emit whole-message text once
+                buf.append(val)
+                buf_len += len(val)
                 await flush()
-        elif kind == "assistant" and val and not got_delta:
-            # no token deltas from this CLI/model → emit whole-message text once
-            buf.append(val)
-            buf_len += len(val)
-            await flush()
-        elif kind == "result":
-            result_obj = obj
+            elif kind == "result":
+                result_obj = obj
+    except Exception as e:  # noqa: BLE001 — a stream read error must not wedge the lane
+        stderr_chunks.append(f"[stream read error: {e}]")
     await flush()
     await proc.wait()
-    stderr = (await proc.stderr.read()).decode(errors="replace")
+    await stderr_task
+    stderr = "".join(stderr_chunks)
 
     ok = bool(result_obj) and not result_obj.get("is_error", False) and proc.returncode == 0
     final_text = (result_obj or {}).get("result") or ""
@@ -351,25 +382,28 @@ async def main_async(args) -> None:
           f"max-concurrent={args.max_concurrent} base-repo={args.base_repo or '(none)'}"
           f"{' (dry-run)' if args.dry_run else ''}. Ctrl-C to stop.", flush=True)
 
+    def _reap(t: asyncio.Task, k: str) -> None:
+        # free the lane the instant the turn finishes (not on the next 30s poll)
+        if running.get(k) is t:
+            running.pop(k, None)
+        if not t.cancelled() and t.exception():
+            print(f"[atmcp] lane {k[:6]} error: {t.exception()}", file=sys.stderr, flush=True)
+
     while True:
         try:
-            # reap finished lanes (surface crashes)
-            for k, t in list(running.items()):
-                if t.done():
-                    running.pop(k, None)
-                    if t.exception():
-                        print(f"[atmcp] lane {k[:6]} error: {t.exception()}", file=sys.stderr, flush=True)
             await c.heartbeat(f"hosting ({len(running)} active)")
             directives = await c.inbox(args.wait_ms)
             for d in directives:
                 key = d.get("session_id") or DEFAULT_KEY
-                if key in running:                       # that thread is busy → next poll
+                if key in running:                       # that thread is busy → skip (next poll)
                     continue
                 if len(running) >= args.max_concurrent:  # at capacity
                     break
                 if not await c.claim(d["directive_id"]):
                     continue
-                running[key] = asyncio.create_task(handle_directive(args, c, d, sid_map, lock))
+                task = asyncio.create_task(handle_directive(args, c, d, sid_map, lock))
+                running[key] = task
+                task.add_done_callback(lambda t, k=key: _reap(t, k))
             if not directives:
                 await asyncio.sleep(args.idle_sleep)
         except asyncio.CancelledError:
