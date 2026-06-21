@@ -47,13 +47,22 @@ async def create_session(
             "title": title, "status": "active", "created_at": now, "updated_at": now}
 
 
+_BUSY = ("SELECT 1 FROM directives d WHERE d.team_id=s.team_id AND d.session_id=s.session_id "
+         "AND d.status IN ('pending','running')")
+
+
 async def get_session(team_id: str, session_id: str) -> dict[str, Any] | None:
     r = await db.fetchone(
-        "SELECT session_id,team_id,agent_id,title,driver,cli_session_id,worktree,status,"
-        "created_at,updated_at FROM sessions WHERE team_id=? AND session_id=?",
+        "SELECT s.session_id,s.team_id,s.agent_id,s.title,s.driver,s.cli_session_id,s.worktree,"
+        f"s.status,s.created_at,s.updated_at, EXISTS({_BUSY}) AS busy "
+        "FROM sessions s WHERE s.team_id=? AND s.session_id=?",
         (team_id, session_id),
     )
-    return _row(r) if r is not None else None
+    if r is None:
+        return None
+    d = _row(r)
+    d["busy"] = bool(d.get("busy"))
+    return d
 
 
 async def list_sessions(
@@ -68,11 +77,18 @@ async def list_sessions(
         clauses.append("status='active'")
     params.append(max(1, min(int(limit or 200), 500)))
     rows = await db.fetchall(
-        "SELECT session_id,agent_id,title,driver,status,created_at,updated_at "
-        f"FROM sessions WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT ?",
+        "SELECT s.session_id,s.agent_id,s.title,s.driver,s.status,s.created_at,s.updated_at, "
+        f"EXISTS({_BUSY}) AS busy FROM sessions s "
+        f"WHERE {' AND '.join('s.' + c if not c.startswith('s.') else c for c in clauses)} "
+        "ORDER BY s.updated_at DESC LIMIT ?",
         params,
     )
-    return [_row(r) for r in rows]
+    out = []
+    for r in rows:
+        d = _row(r)
+        d["busy"] = bool(d.get("busy"))
+        out.append(d)
+    return out
 
 
 async def rename_session(team_id: str, session_id: str, title: str) -> dict[str, Any]:

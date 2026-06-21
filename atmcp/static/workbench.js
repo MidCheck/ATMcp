@@ -77,10 +77,10 @@ function renderTree() {
     const rows = sess.length
       ? sess.map((s) => {
           const sel = current && current.session_id === s.session_id ? " sel" : "";
-          const running = s.updated_at && (Date.now() - s.updated_at < 60000);
+          const label = s.busy ? "working…" : s.status;
           return `<div class="sess${sel}" data-sid="${esc(s.session_id)}" data-aid="${esc(a.agent_id)}">
             <span class="stitle">${esc(s.title)}</span>
-            <span class="sstat${running ? " running" : ""}">${esc(s.status)}</span></div>`;
+            <span class="sstat${s.busy ? " running" : ""}">${esc(label)}</span></div>`;
         }).join("")
       : '<div class="empty">no sessions — + to start</div>';
     return `<div class="agentnode${open}" data-aid="${esc(a.agent_id)}">
@@ -146,6 +146,7 @@ async function selectSession(sid, aid) {
     if (mine !== selectToken) return;
     current.title = d.session.title;
     el("crumb").innerHTML = `${esc(agent ? agent.display_name : "")} <span class="mut">/</span> ${esc(d.session.title)}`;
+    setSessStatus(d.session.busy ? "working" : "idle");
     // merge user messages (directives) + output by timestamp into a flowing transcript
     const items = [];
     (d.directives || []).forEach((x) => items.push({ ts: x.created_at, role: "you", text: x.instruction }));
@@ -184,8 +185,10 @@ async function send() {
   const text = inp.value.trim();
   if (!text || !current) return;
   if (needToken()) return;
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
   inp.value = "";
   appendMsg("you", text);
+  setSessStatus("working");
   try {
     const r = await fetch(api("/sessions/" + encodeURIComponent(current.session_id) + "/message"),
       { method: "POST", headers: authHeaders(), body: JSON.stringify({ text }) });
@@ -214,6 +217,7 @@ async function archiveCurrent() {
   current = null; el("crumb").innerHTML = '<span class="mut">select or start a session →</span>';
   el("input").disabled = true; el("sendBtn").disabled = true;
   el("renameBtn").style.display = "none"; el("archiveBtn").style.display = "none";
+  setSessStatus(null);
   resetTranscript(); el("transcript").innerHTML = '<div class="placeholder">Session archived.</div>';
   refreshTree();
 }
@@ -221,6 +225,33 @@ window.archiveCurrent = archiveCurrent;
 
 function toggleSidebar() { el("sidebar").classList.toggle("collapsed"); }
 window.toggleSidebar = toggleSidebar;
+
+// ── per-session status indicator + desktop notification ────────────────────────
+function setSessStatus(state) {
+  const p = el("sessStatus");
+  const map = { working: "● working…", done: "✓ done", failed: "✗ failed", idle: "idle" };
+  if (!state) { p.style.display = "none"; return; }
+  p.style.display = "";
+  p.className = "pill sstatpill " + state;
+  p.textContent = map[state] || state;
+}
+function sessName(sid) {
+  for (const aid in sessByAgent) {
+    const s = (sessByAgent[aid] || []).find((x) => x.session_id === sid);
+    if (s) { const a = agents.find((g) => g.agent_id === aid); return (a ? a.display_name : "agent") + " / " + s.title; }
+  }
+  return "a session";
+}
+function notifyDone(sid, kind, summary) {
+  // ping the user so they don't have to keep checking — esp. when not watching this thread
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const watching = current && current.session_id === sid && !document.hidden;
+  if (watching) return;
+  try {
+    new Notification(`ATMcp · ${sessName(sid)}`,
+      { body: (kind === "directive_failed" ? "✗ failed" : "✓ done") + (summary ? " — " + summary : "") });
+  } catch (e) {}
+}
 
 // ── tree click delegation ──────────────────────────────────────────────────────
 function wireTree() {
@@ -252,10 +283,22 @@ function connectWS() {
     if (f.type === "presence") { scheduleTree(); return; }
     if (f.type === "event") {
       const k = f.kind || "";
+      const p = f.payload || {};
       if (k.startsWith("session_")) scheduleTree();
-      if (current && k === "directive_done" && f.payload && f.payload.session_id === current.session_id) {/* turn ended */}
-      if (current && k === "directive_failed" && f.payload && f.payload.session_id === current.session_id)
-        addEvt("✗ failed" + (f.payload.result_summary ? " — " + f.payload.result_summary : ""));
+      if (k.startsWith("directive_")) {
+        scheduleTree();                                   // refresh busy indicators in the tree
+        const psid = p.session_id;
+        const mine = current && psid && psid === current.session_id;
+        if (k === "directive_sent" || k === "directive_claimed") {
+          if (mine) setSessStatus("working");
+        } else if (k === "directive_done") {
+          if (mine) { setSessStatus("done"); addEvt("✓ done"); }
+          notifyDone(psid, k, p.result_summary);
+        } else if (k === "directive_failed") {
+          if (mine) { setSessStatus("failed"); addEvt("✗ failed" + (p.result_summary ? " — " + p.result_summary : "")); }
+          notifyDone(psid, k, p.result_summary);
+        }
+      }
     }
   };
 }

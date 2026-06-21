@@ -51,7 +51,12 @@
     .sess.sel { background:var(--panel2); outline:1px solid var(--accent); }
     .sess .stitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .sess .sstat { font-size:10px; color:var(--muted); }
-    .sess .sstat.running { color:var(--accent); }
+    .sess .sstat.running { color:var(--amber); }
+    .sess .sstat.running::before { content:"● "; animation:pulse 1.1s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.25;} }
+    .sstatpill.working { color:var(--amber); border-color:var(--amber); }
+    .sstatpill.done { color:var(--green); border-color:var(--green); }
+    .sstatpill.failed { color:var(--red); border-color:var(--red); }
     .empty { color:var(--muted); font-style:italic; padding:6px 10px; font-size:12.5px; }
 
     /* RIGHT chat */
@@ -110,6 +115,7 @@
       <main class="chat">
         <div class="chathead">
           <div class="crumb" id="crumb"><span class="mut">select or start a session →</span></div>
+          <span class="pill sstatpill" id="sessStatus" style="display:none"></span>
           <span style="flex:1"></span>
           <button class="iconbtn" id="renameBtn" style="display:none" onclick="renameCurrent()">rename</button>
           <button class="iconbtn" id="archiveBtn" style="display:none" onclick="archiveCurrent()">archive</button>

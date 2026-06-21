@@ -128,6 +128,23 @@ async def test_rest_session_writes_require_token(client):
         assert (await c.post("/api/teams/wb/sessions", json={"agent": "bob"})).status_code == 401
 
 
+async def test_session_busy_reflects_pending_directive(team):
+    tid = team["team_id"]
+    bob = await join(team, "bob")
+    console = Caller(tid, "console:c", "c", "rest-console:c")
+    sid = (await sessions_svc.create_session(tid, bob.agent_id, "t"))["session_id"]
+    assert (await sessions_svc.get_session(tid, sid))["busy"] is False
+
+    did = (await directives_svc.send_directive(console, "bob", "x", session_id=sid))["directive_id"]
+    assert (await sessions_svc.get_session(tid, sid))["busy"] is True            # pending → busy
+    assert (await sessions_svc.list_sessions(tid, bob.agent_id))[0]["busy"] is True
+
+    await directives_svc.claim_directive(bob, did)
+    assert (await sessions_svc.get_session(tid, sid))["busy"] is True            # running → busy
+    await directives_svc.report_directive(bob, did, "done", "ok")
+    assert (await sessions_svc.get_session(tid, sid))["busy"] is False           # terminal → idle
+
+
 async def test_workbench_page_served(client):
     async with client as c:
         r = await c.get("/workbench")

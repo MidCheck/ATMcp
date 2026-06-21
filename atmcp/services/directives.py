@@ -129,7 +129,7 @@ async def claim_directive(caller: Caller, directive_id: str) -> dict[str, Any]:
     now = now_ms()
     async with db.transaction() as tx:
         d = await tx.fetchone(
-            "SELECT to_agent, status FROM directives WHERE team_id=? AND directive_id=?",
+            "SELECT to_agent, status, session_id FROM directives WHERE team_id=? AND directive_id=?",
             (team_id, directive_id),
         )
         if d is None:
@@ -146,7 +146,8 @@ async def claim_directive(caller: Caller, directive_id: str) -> dict[str, Any]:
         if cur.rowcount != 1:
             return {"ok": False, "error": "race_lost"}
         eid = await events.append(
-            tx, team_id, events.DIRECTIVE_CLAIMED, "directive", directive_id, agent_id, {}
+            tx, team_id, events.DIRECTIVE_CLAIMED, "directive", directive_id, agent_id,
+            {"session_id": d["session_id"]},
         )
         await tx.execute(
             "UPDATE directives SET last_event_id=? WHERE team_id=? AND directive_id=?",
