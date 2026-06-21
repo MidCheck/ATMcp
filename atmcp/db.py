@@ -68,6 +68,21 @@ async def init(path: str | None = None) -> None:
 
 async def _migrate(conn: aiosqlite.Connection) -> None:
     """Tiny forward migrations for pre-existing dev databases."""
+    # Add session_id (workbench threads) to directives/agent_output if missing. Additive,
+    # nullable — existing rows become the agent's default/legacy thread (NULL).
+    for table in ("directives", "agent_output"):
+        cur = await conn.execute(f"PRAGMA table_info({table})")
+        cols = [r[1] for r in await cur.fetchall()]
+        await cur.close()
+        if cols and "session_id" not in cols:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
+    # Index on the (now-guaranteed) session_id column — created here, not in schema.sql,
+    # so it never references the column before an ALTER adds it to an old table.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_output_session ON agent_output(team_id, session_id, id)"
+    )
+    await conn.commit()
+
     cur = await conn.execute("PRAGMA table_info(idempotency)")
     cols = [r[1] for r in await cur.fetchall()]
     await cur.close()

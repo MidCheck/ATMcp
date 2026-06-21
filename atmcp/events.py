@@ -32,6 +32,9 @@ DIRECTIVE_DONE = "directive_done"
 DIRECTIVE_FAILED = "directive_failed"
 DIRECTIVE_CANCELED = "directive_canceled"
 USAGE_REPORTED = "usage_reported"
+SESSION_CREATED = "session_created"
+SESSION_UPDATED = "session_updated"
+SESSION_ARCHIVED = "session_archived"
 
 
 async def append(

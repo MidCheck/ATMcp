@@ -44,6 +44,7 @@ async def send_directive(
     payload: dict[str, Any] | None = None,
     priority: int = 0,
     idem_key: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     team_id = caller.team_id
     target = await identity_svc.resolve_agent_ref(team_id, to_agent)
@@ -57,22 +58,37 @@ async def send_directive(
             prior = await idempotency.check(tx, team_id, caller.agent_id, idem_key)
             if prior is not None:
                 return prior
+        # A session_id ties this directive to a workbench thread; only honor one that
+        # exists in this team AND belongs to the target agent (else drop to the default thread).
+        if session_id is not None:
+            ok_sess = await tx.fetchval(
+                "SELECT 1 FROM sessions WHERE team_id=? AND session_id=? AND agent_id=?",
+                (team_id, session_id, target),
+            )
+            if not ok_sess:
+                session_id = None
         await tx.execute(
-            "INSERT INTO directives(directive_id,team_id,from_agent,to_agent,instruction,"
+            "INSERT INTO directives(directive_id,team_id,from_agent,to_agent,session_id,instruction,"
             "payload_json,status,priority,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,'pending',?,?,?)",
-            (did, team_id, caller.agent_id, target, instruction, json.dumps(payload or {}),
+            "VALUES(?,?,?,?,?,?,?,'pending',?,?,?)",
+            (did, team_id, caller.agent_id, target, session_id, instruction, json.dumps(payload or {}),
              int(priority), now, now),
         )
+        if session_id is not None:
+            await tx.execute(
+                "UPDATE sessions SET updated_at=? WHERE team_id=? AND session_id=?",
+                (now, team_id, session_id),
+            )
         eid = await events.append(
             tx, team_id, events.DIRECTIVE_SENT, "directive", did, caller.agent_id,
-            {"to_agent": target, "instruction": instruction[:200]},
+            {"to_agent": target, "instruction": instruction[:200], "session_id": session_id},
         )
         await tx.execute(
             "UPDATE directives SET last_event_id=? WHERE team_id=? AND directive_id=?",
             (eid, team_id, did),
         )
-        result = {"ok": True, "directive_id": did, "to_agent": target, "event_id": eid}
+        result = {"ok": True, "directive_id": did, "to_agent": target,
+                  "session_id": session_id, "event_id": eid}
         if idem_key:
             await idempotency.store(tx, team_id, caller.agent_id, idem_key, result)
     return result
@@ -81,14 +97,15 @@ async def send_directive(
 async def _read_inbox(team_id: str, agent_id: str, statuses: tuple[str, ...], limit: int):
     placeholders = ",".join("?" * len(statuses))
     rows = await db.fetchall(
-        f"SELECT directive_id,from_agent,instruction,payload_json,status,priority,created_at "
+        f"SELECT directive_id,from_agent,session_id,instruction,payload_json,status,priority,created_at "
         f"FROM directives WHERE team_id=? AND to_agent=? AND status IN ({placeholders}) "
         f"ORDER BY priority DESC, created_at ASC LIMIT ?",
         (team_id, agent_id, *statuses, max(1, min(int(limit or 20), 100))),
     )
     return [
         {"directive_id": r["directive_id"], "from_agent": r["from_agent"],
-         "instruction": r["instruction"], "payload": json.loads(r["payload_json"]),
+         "session_id": r["session_id"], "instruction": r["instruction"],
+         "payload": json.loads(r["payload_json"]),
          "status": r["status"], "priority": r["priority"], "created_at": r["created_at"]}
         for r in rows
     ]

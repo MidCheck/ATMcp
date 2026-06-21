@@ -21,6 +21,7 @@ async def append_output(
     text: str,
     directive_id: str | None = None,
     source: str = "agent",
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     text = (text or "")[: settings.output_max_chunk]
     now = now_ms()
@@ -34,16 +35,24 @@ async def append_output(
             )
             if not ref:
                 directive_id = None
+        # Same for the session tag: keep only a real session in this team.
+        if session_id is not None:
+            ref = await tx.fetchval(
+                "SELECT 1 FROM sessions WHERE team_id=? AND session_id=?",
+                (team_id, session_id),
+            )
+            if not ref:
+                session_id = None
         cur = await tx.execute(
-            "INSERT INTO agent_output(team_id,agent_id,directive_id,source,text,ts) "
-            "VALUES(?,?,?,?,?,?)",
-            (team_id, agent_id, directive_id, source, text, now),
+            "INSERT INTO agent_output(team_id,agent_id,session_id,directive_id,source,text,ts) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (team_id, agent_id, session_id, directive_id, source, text, now),
         )
         seq = int(cur.lastrowid)
     await hub.tick(
         team_id,
-        {"type": "output", "agent_id": agent_id, "directive_id": directive_id,
-         "seq": seq, "text": text, "ts": now},
+        {"type": "output", "agent_id": agent_id, "session_id": session_id,
+         "directive_id": directive_id, "seq": seq, "text": text, "ts": now},
     )
     return {"ok": True, "seq": seq}
 

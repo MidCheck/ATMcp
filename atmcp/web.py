@@ -23,6 +23,7 @@ from atmcp.services import directives as directives_svc
 from atmcp.services import identity as identity_svc
 from atmcp.services import output as output_svc
 from atmcp.services import presence as presence_svc
+from atmcp.services import sessions as sessions_svc
 from atmcp.services import status as status_svc
 from atmcp.services import tasks as tasks_svc
 from atmcp.services import usage as usage_svc
@@ -244,6 +245,113 @@ def register(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="unknown agent")
         return await output_svc.get_output(team["team_id"], aid, since_seq, 0, limit)
 
+    # ── Workbench sessions (threads): chat-style multi-session control ─────────
+    @app.get("/api/teams/{team_name}/sessions")
+    async def list_sessions(
+        team_name: str, agent: str | None = None, include_archived: bool = False,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        aid = None
+        if agent:
+            aid = await identity_svc.resolve_agent_ref(team["team_id"], agent)
+            if aid is None:
+                raise HTTPException(status_code=404, detail="unknown agent")
+        items = await sessions_svc.list_sessions(team["team_id"], aid, include_archived)
+        return {"sessions": items, "count": len(items)}
+
+    @app.get("/api/teams/{team_name}/sessions/{session_id}")
+    async def get_session(team_name: str, session_id: str, token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        s = await sessions_svc.get_session(team["team_id"], session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+        return {"session": s, **await sessions_svc.transcript(team["team_id"], session_id)}
+
+    @app.get("/api/teams/{team_name}/sessions/{session_id}/output")
+    async def session_output(
+        team_name: str, session_id: str, since_seq: int = 0, wait_ms: int = 0,
+        limit: int = 300, token: str | None = None,
+    ) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        return await sessions_svc.session_output(team["team_id"], session_id, since_seq, wait_ms, limit)
+
+    @app.post("/api/teams/{team_name}/sessions")
+    async def create_session(
+        team_name: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        agent = b.get("agent")
+        if not agent:
+            raise HTTPException(status_code=400, detail="agent required")
+        aid = await identity_svc.resolve_agent_ref(team["team_id"], agent)
+        if aid is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        return await sessions_svc.create_session(
+            team["team_id"], aid, b.get("title"), b.get("driver"), b.get("created_by") or "workbench"
+        )
+
+    @app.post("/api/teams/{team_name}/sessions/{session_id}/message")
+    async def session_message(
+        team_name: str, session_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Send a chat message into a thread = a directive scoped to the session's agent."""
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        text = (b.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text required")
+        s = await sessions_svc.get_session(team["team_id"], session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+        who = b.get("from") or "workbench"
+        caller = Caller(team["team_id"], f"console:{who}", who, f"rest-console:{who}")
+        return await directives_svc.send_directive(
+            caller, s["agent_id"], text, priority=int(b.get("priority") or 0), session_id=session_id
+        )
+
+    @app.post("/api/teams/{team_name}/sessions/{session_id}/rename")
+    async def rename_session(
+        team_name: str, session_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        return await sessions_svc.rename_session(team["team_id"], session_id, b.get("title", ""))
+
+    @app.post("/api/teams/{team_name}/sessions/{session_id}/archive")
+    async def archive_session(
+        team_name: str, session_id: str, body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        return await sessions_svc.archive_session(team["team_id"], session_id)
+
+    @app.post("/api/teams/{team_name}/sessions/{session_id}/executor")
+    async def session_executor_state(
+        team_name: str, session_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """The worker records the executor's resumable session id / worktree for this thread."""
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        return await sessions_svc.set_executor_state(
+            team["team_id"], session_id, b.get("cli_session_id"), b.get("worktree")
+        )
+
     @app.post("/api/teams/{team_name}/heartbeat")
     async def rest_heartbeat(
         team_name: str,
@@ -300,7 +408,8 @@ def register(app: FastAPI) -> None:
         if not text:
             raise HTTPException(status_code=400, detail="text required")
         return await output_svc.append_output(
-            team["team_id"], agent_id, text, (body or {}).get("directive_id"), source="hook"
+            team["team_id"], agent_id, text, (body or {}).get("directive_id"), source="hook",
+            session_id=(body or {}).get("session_id"),
         )
 
     @app.post("/api/teams/{team_name}/agents/{agent_ref}/usage")

@@ -179,12 +179,33 @@ CREATE TABLE IF NOT EXISTS task_claims (
 );
 CREATE INDEX IF NOT EXISTS idx_claims_team_task ON task_claims(team_id, task_id);
 
+-- ── Sessions (threads): a conversation line with one agent (workbench) ───────
+-- One session = one chat thread = one independent memory. Maps to an executor
+-- session (cli_session_id for CLI drivers) or a server-stored transcript (API
+-- drivers). Directives + output rows reference a session_id (nullable: a NULL
+-- session_id is the agent's legacy/default thread, keeping /team compatible).
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id     TEXT PRIMARY KEY,
+  team_id        TEXT NOT NULL,
+  agent_id       TEXT NOT NULL,                 -- the agent this thread belongs to
+  title          TEXT NOT NULL DEFAULT 'New session',
+  driver         TEXT,                          -- executor kind (claude|codex|cursor|openai-compat)
+  cli_session_id TEXT,                          -- executor's resumable session id (set by worker)
+  worktree       TEXT,                          -- per-session working dir (set by worker)
+  status         TEXT NOT NULL DEFAULT 'active',-- active|archived
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  last_event_id  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_team_agent ON sessions(team_id, agent_id, status, updated_at);
+
 -- ── Directives: point-to-point commands (console -> a specific agent) ───────
 CREATE TABLE IF NOT EXISTS directives (
   directive_id   TEXT PRIMARY KEY,
   team_id        TEXT NOT NULL,
   from_agent     TEXT NOT NULL,                 -- issuer (the console)
   to_agent       TEXT NOT NULL,                 -- target agent_id
+  session_id     TEXT,                          -- which thread (NULL = default/legacy thread)
   instruction    TEXT NOT NULL,
   payload_json   TEXT NOT NULL DEFAULT '{}',
   status         TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed|canceled
@@ -203,12 +224,15 @@ CREATE TABLE IF NOT EXISTS agent_output (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,  -- monotonic tail cursor
   team_id      TEXT NOT NULL,
   agent_id     TEXT NOT NULL,
+  session_id   TEXT,                               -- which thread (NULL = default/legacy)
   directive_id TEXT,
   source       TEXT NOT NULL DEFAULT 'agent',      -- agent | hook
   text         TEXT NOT NULL,
   ts           INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_output_tail ON agent_output(team_id, agent_id, id);
+-- idx_output_session is created in db._migrate (after session_id is guaranteed to exist,
+-- so it also works when ALTERing a pre-existing agent_output table).
 
 -- ── Usage: per-execution token/cost accounting (append-only meter) ──────────
 -- One row per worker model run (parsed from `claude -p --output-format json`'s
