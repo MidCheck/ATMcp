@@ -502,13 +502,90 @@ async def _run_tool(args, c: Client, session_id, cwd: str | None, name: str, a: 
     return f"(unknown tool: {name})"
 
 
-def _openai_chat(args, msgs: list[dict]) -> dict:
-    body = {"model": args.model, "messages": msgs, "tools": TOOLS, "stream": False}
+_SENTINEL = object()
+
+
+def _openai_stream_blocking(args, msgs: list[dict], emit) -> tuple[str, list[dict], dict]:
+    """Blocking SSE read of one chat round. Calls emit(text) for each content delta as it
+    arrives; assembles streamed tool_calls by index and the final usage. Returns
+    (content, tool_calls, usage). Runs in a worker thread (urllib is blocking)."""
+    body = {"model": args.model, "messages": msgs, "tools": TOOLS, "stream": True,
+            "stream_options": {"include_usage": True}}
     req = urllib.request.Request(
         args.api_base.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + (args.api_key or "ollama")})
+    parts: list[str] = []
+    tcs: dict[int, dict] = {}
+    usage: dict = {}
     with urllib.request.urlopen(req, timeout=args.openai_timeout) as r:
-        return json.load(r)
+        for raw in r:                                   # iterates SSE lines
+            line = raw.decode(errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except ValueError:
+                continue
+            if obj.get("usage"):
+                usage = obj["usage"]
+            ch = (obj.get("choices") or [{}])[0]
+            delta = ch.get("delta") or {}
+            txt = delta.get("content")
+            if txt:
+                parts.append(txt)
+                emit(txt)
+            for tcd in (delta.get("tool_calls") or []):
+                idx = tcd.get("index", 0)
+                slot = tcs.setdefault(idx, {"id": None, "type": "function",
+                                            "function": {"name": "", "arguments": ""}})
+                if tcd.get("id"):
+                    slot["id"] = tcd["id"]
+                fn = tcd.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]           # name arrives whole (set)
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]  # args stream (append)
+    tool_calls = [tcs[k] for k in sorted(tcs)]
+    return "".join(parts), tool_calls, usage
+
+
+async def _openai_round(args, c: Client, session_id, did, msgs: list[dict]) -> tuple[str, list[dict], dict]:
+    """One streaming round: bridges the blocking SSE reader's content deltas to the live output
+    stream via a queue, batching small deltas. Returns (content, tool_calls, usage)."""
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def emit(text: str) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, text)
+
+    def worker():
+        try:
+            return _openai_stream_blocking(args, msgs, emit)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+
+    task = asyncio.create_task(asyncio.to_thread(worker))
+    buf: list[str] = []
+    buf_len = 0
+
+    async def flush():
+        nonlocal buf, buf_len
+        if buf:
+            await c.append_output("".join(buf), session_id, did)
+            buf, buf_len = [], 0
+
+    while True:
+        item = await queue.get()
+        if item is _SENTINEL:
+            break
+        buf.append(item); buf_len += len(item)
+        if buf_len >= 120:
+            await flush()
+    await flush()
+    return await task   # propagates any HTTP error from the worker
 
 
 def _msgs_path(args, key: str) -> str:
@@ -550,23 +627,17 @@ async def _drive_openai(args, c: Client, session_id, did, key, cwd, prompt, lock
     step = 0
     for step in range(args.max_steps):
         try:
-            resp = await asyncio.to_thread(_openai_chat, args, msgs)
+            content, tool_calls, u = await _openai_round(args, c, session_id, did, msgs)
         except Exception as e:  # noqa: BLE001
             ok, final_text = False, f"model call failed: {e}"
             break
-        ch = (resp.get("choices") or [{}])[0]
-        m = ch.get("message") or {}
-        u = resp.get("usage") or {}
         total_in += int(u.get("prompt_tokens") or 0)
         total_out += int(u.get("completion_tokens") or 0)
-        content = m.get("content") or ""
-        tool_calls = m.get("tool_calls") or []
         asst = {"role": "assistant", "content": content}
         if tool_calls:
             asst["tool_calls"] = tool_calls
         msgs.append(asst)
-        if content:
-            await c.append_output(content, session_id, did)
+        if content:               # already streamed live by _openai_round
             final_text = content
         if not tool_calls:
             break

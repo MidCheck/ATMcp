@@ -207,17 +207,47 @@ async def test_run_tool_file_rw_and_escape(tmp_path):
     assert "BLOCKED" in await host._run_tool(args, c, "s", str(tmp_path), "read_file", {"path": "/etc/hosts"})
 
 
+def test_openai_stream_parse_assembles_deltas_tools_usage(monkeypatch):
+    # a fake SSE body: content deltas + a tool_call streamed in fragments + final usage
+    sse = b"".join(line + b"\n" for line in [
+        b'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+        b'data: {"choices":[{"delta":{"content":"lo"}}]}',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"run_bash","arguments":"{\\"comm"}}]}}]}',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"and\\":\\"ls\\"}"}}]}}]}',
+        b'data: {"usage":{"prompt_tokens":11,"completion_tokens":4}}',
+        b'data: [DONE]',
+    ])
+
+    class FakeResp:
+        def __enter__(self): return iter(sse.splitlines(keepends=True))
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(host.urllib.request, "urlopen", lambda req, timeout=0: FakeResp())
+
+    emitted = []
+    args = SimpleNamespace(model="m", api_base="http://x/v1", api_key="k", openai_timeout=5)
+    content, tools, usage = host._openai_stream_blocking(args, [{"role": "user", "content": "hi"}], emitted.append)
+    assert content == "Hello" and emitted == ["Hel", "lo"]                  # streamed deltas
+    assert len(tools) == 1 and tools[0]["function"]["name"] == "run_bash"
+    assert tools[0]["function"]["arguments"] == '{"command":"ls"}'          # fragments reassembled
+    assert usage == {"prompt_tokens": 11, "completion_tokens": 4}
+
+
 async def test_drive_openai_agent_loop(tmp_path, monkeypatch):
-    # scripted endpoint: round 1 calls run_bash, round 2 gives the final answer
-    responses = [
-        {"choices": [{"message": {"content": "", "tool_calls": [
-            {"id": "c1", "function": {"name": "run_bash", "arguments": "{\"command\": \"echo hello\"}"}}]}}],
-         "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
-        {"choices": [{"message": {"content": "All done."}}],
-         "usage": {"prompt_tokens": 12, "completion_tokens": 3}},
+    # scripted rounds (streaming layer mocked): round 1 calls run_bash, round 2 finalizes
+    rounds = [
+        ("", [{"id": "c1", "type": "function",
+               "function": {"name": "run_bash", "arguments": "{\"command\": \"echo hello\"}"}}],
+         {"prompt_tokens": 10, "completion_tokens": 5}),
+        ("All done.", [], {"prompt_tokens": 12, "completion_tokens": 3}),
     ]
-    it = iter(responses)
-    monkeypatch.setattr(host, "_openai_chat", lambda args, msgs: next(it))
+    it = iter(rounds)
+
+    async def fake_round(args, c, session_id, did, msgs):
+        content, tools, usage = next(it)
+        if content:
+            await c.append_output(content, session_id, did)   # streaming layer forwards content
+        return content, tools, usage
+    monkeypatch.setattr(host, "_openai_round", fake_round)
 
     class Stub:
         def __init__(self): self.out = []
