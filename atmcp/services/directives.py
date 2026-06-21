@@ -173,7 +173,7 @@ async def report_directive(
             if prior is not None:
                 return prior
         d = await tx.fetchone(
-            "SELECT to_agent, status FROM directives WHERE team_id=? AND directive_id=?",
+            "SELECT to_agent, status, session_id FROM directives WHERE team_id=? AND directive_id=?",
             (team_id, directive_id),
         )
         if d is None:
@@ -188,10 +188,15 @@ async def report_directive(
                 "WHERE team_id=? AND directive_id=?",
                 (status, result_summary, output, now, team_id, directive_id),
             )
+            if d["session_id"] is not None:
+                await tx.execute(
+                    "UPDATE sessions SET updated_at=? WHERE team_id=? AND session_id=?",
+                    (now, team_id, d["session_id"]),
+                )
             kind = events.DIRECTIVE_DONE if status == "done" else events.DIRECTIVE_FAILED
             eid = await events.append(
                 tx, team_id, kind, "directive", directive_id, agent_id,
-                {"result_summary": result_summary},
+                {"result_summary": result_summary, "session_id": d["session_id"]},
             )
             await tx.execute(
                 "UPDATE directives SET last_event_id=? WHERE team_id=? AND directive_id=?",

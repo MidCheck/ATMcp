@@ -518,6 +518,10 @@ def register(app: FastAPI) -> None:
     async def dashboard() -> FileResponse:
         return FileResponse(str(STATIC_DIR / "dashboard.html"))
 
+    @app.get("/workbench")
+    async def workbench() -> FileResponse:
+        return FileResponse(str(STATIC_DIR / "workbench.html"))
+
     @app.get("/")
     async def root() -> dict[str, Any]:
         return {

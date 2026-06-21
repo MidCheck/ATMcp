@@ -126,3 +126,23 @@ async def test_rest_session_writes_require_token(client):
     async with client as c:
         await c.post("/api/teams", json={"name": "wb"}, headers={"X-Admin-Token": settings.admin_token})
         assert (await c.post("/api/teams/wb/sessions", json={"agent": "bob"})).status_code == 401
+
+
+async def test_workbench_page_served(client):
+    async with client as c:
+        r = await c.get("/workbench")
+        assert r.status_code == 200 and "Workbench" in r.text
+
+
+async def test_directive_failed_event_carries_session_id(team):
+    # the workbench filters failed-events by session_id, so the payload must include it
+    tid = team["team_id"]
+    bob = await join(team, "bob")
+    console = Caller(tid, "console:c", "c", "rest-console:c")
+    sid = (await sessions_svc.create_session(tid, bob.agent_id, "t"))["session_id"]
+    did = (await directives_svc.send_directive(console, "bob", "x", session_id=sid))["directive_id"]
+    await directives_svc.claim_directive(bob, did)
+    await directives_svc.report_directive(bob, did, "failed", "boom")
+    from atmcp.services import status as status_svc
+    ev = next(e for e in await status_svc.recent_events(tid, 50) if e["kind"] == "directive_failed")
+    assert ev["payload"]["session_id"] == sid

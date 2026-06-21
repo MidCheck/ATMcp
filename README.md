@@ -237,6 +237,24 @@ long-poll, `POST …/directives/{id}/claim`, `…/report`). If you'd rather run 
 and avoid bare `/loop /atmcp-worker` (dynamic mode can silently stop, esp. Windows PowerShell;
 use `/loop 30s`).
 
+## Workbench (preview)
+
+A chat-style, any-device control plane that runs **alongside** the dashboard (it does not
+replace anything — `/team` and the dashboard keep working). Open
+`http://<host>/workbench?team=<team>`: a collapsible **team → agent → session** tree on the
+left, a streaming **web chat** on the right (pinned input; output streams in token-by-token).
+Each session is an independent conversation thread (its own memory). Drive it with the
+**concurrent streaming host** (one host per agent, multiple threads at once, each in its own git
+worktree):
+
+```bash
+python scripts/atmcp_workbench_host.py --url http://<host>:8000 \
+  --team <team> --token <join_token> --name bob --base-repo ~/code/myrepo   # --dry-run to test
+```
+
+See **[`docs/workbench-design.md`](docs/workbench-design.md)** for the full design and roadmap
+(codex/cursor/local-Ollama drivers, local-models-that-act, and more are planned phases).
+
 ## Making agents actually use it
 
 MCP is pull, not push: the tools are available, but the model decides when to call them and
