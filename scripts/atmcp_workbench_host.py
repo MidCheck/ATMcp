@@ -112,6 +112,33 @@ def build_claude_cmd(args, cli_session_id: str | None) -> list[str]:
     return _win_wrap(cmd)
 
 
+# CLI-text executors (codex/cursor): a command template with a {prompt} token. Per-session
+# memory comes from running in the session's own worktree (cwd) + the tool's own resume flag —
+# add it in the template, e.g. "codex exec resume --last {prompt}". These stream plain stdout
+# (no structured token deltas / usage). Best-effort; override freely with --executor-cmd.
+DEFAULT_TEMPLATES = {
+    "codex": "codex exec {prompt}",
+    "cursor": "cursor-agent -p {prompt}",
+}
+
+
+def resolve_template(args) -> str | None:
+    """The CLI-text template to use, or None to use the structured claude driver."""
+    if args.executor_cmd:
+        return args.executor_cmd
+    if args.executor and args.executor != "claude":
+        return DEFAULT_TEMPLATES.get(args.executor, "{prompt}")
+    return None
+
+
+def build_custom_cmd(template: str, prompt: str) -> list[str]:
+    """Split the template safely; substitute {prompt} as ONE argv element (no shell, no injection)."""
+    parts = shlex.split(template)
+    if "{prompt}" in parts:
+        return [prompt if p == "{prompt}" else p for p in parts]
+    return parts + [prompt]
+
+
 # ── HTTP client (urllib, run off the event loop via to_thread) ────────────────
 class Client:
     def __init__(self, url: str, team: str, token: str, name: str):
@@ -245,50 +272,29 @@ def ensure_worktree(args, session_id: str) -> str | None:
     return path
 
 
-# ── one directive (one thread turn) ──────────────────────────────────────────
-async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asyncio.Lock) -> None:
-    did = d["directive_id"]
-    session_id = d.get("session_id")
-    instruction = d["instruction"]
-    key = session_id or DEFAULT_KEY
-    prompt = EXEC_PROMPT.format(instruction=instruction)
+# ── drivers ──────────────────────────────────────────────────────────────────
+async def _drain(stream, sink: list[str]) -> None:
+    try:
+        async for line in stream:
+            sink.append(line.decode(errors="replace"))
+    except Exception:  # noqa: BLE001
+        pass
 
-    cwd = await asyncio.to_thread(ensure_worktree, args, session_id) if session_id else None
-    cli_sid = sid_map.get(key)
+
+async def _drive_claude(args, c: Client, session_id, did, cli_sid, cwd, prompt):
+    """Structured stream-json driver: token deltas, captured session id, usage. Returns
+    (ok, final_text, new_cli_sid, usage)."""
     cmd = build_claude_cmd(args, cli_sid)
-
-    await c.heartbeat(f"thread {key[:6]}: {instruction[:32]}")
-    await c.append_output("▶ " + instruction[:200], session_id, did)
-
-    if args.dry_run:
-        await c.append_output(f"[dry-run] would run claude (resume={bool(cli_sid)}) in {cwd or 'cwd'}",
-                              session_id, did)
-        await c.report(did, "done", "[dry-run]", "[dry-run]")
-        return
-
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE, cwd=cwd,
-            limit=8 * 1024 * 1024,   # stream-json `result` lines can exceed the 64KiB default
+            stderr=asyncio.subprocess.PIPE, cwd=cwd, limit=8 * 1024 * 1024,
         )
     except FileNotFoundError:
-        await c.report(did, "failed", "executor not found", f"not found: {cmd[0]}")
-        return
+        return False, f"executor not found: {cmd[0]}", None, None
 
-    # Drain stderr concurrently so a full stderr pipe can never deadlock the stdout reader.
     stderr_chunks: list[str] = []
-
-    async def _drain_stderr():
-        try:
-            async for sline in proc.stderr:
-                stderr_chunks.append(sline.decode(errors="replace"))
-        except Exception:  # noqa: BLE001
-            pass
-
-    stderr_task = asyncio.create_task(_drain_stderr())
-
-    # Feed the prompt; tolerate a child that exited / closed stdin early (e.g. stale --resume).
+    stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_chunks))
     try:
         proc.stdin.write(prompt.encode())
         await proc.stdin.drain()
@@ -326,15 +332,11 @@ async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asynci
                 new_cli_sid = val
             elif kind == "delta" and val:
                 got_delta = True
-                buf.append(val)
-                buf_len += len(val)
+                buf.append(val); buf_len += len(val)
                 if buf_len >= 200:
                     await flush()
             elif kind == "assistant" and val and not got_delta:
-                # no token deltas from this CLI/model → emit whole-message text once
-                buf.append(val)
-                buf_len += len(val)
-                await flush()
+                buf.append(val); buf_len += len(val); await flush()
             elif kind == "result":
                 result_obj = obj
     except Exception as e:  # noqa: BLE001 — a stream read error must not wedge the lane
@@ -347,22 +349,96 @@ async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asynci
     ok = bool(result_obj) and not result_obj.get("is_error", False) and proc.returncode == 0
     final_text = (result_obj or {}).get("result") or ""
     if not got_delta and final_text:
-        await c.append_output(final_text, session_id, did)   # nothing streamed → ensure output
+        await c.append_output(final_text, session_id, did)
     if not ok and not final_text:
         final_text = (stderr.strip() or f"exit {proc.returncode}")[:4000]
+    return ok, final_text, new_cli_sid, extract_usage(result_obj or {}, args.model)
 
-    # persist the thread's resumable session id (under the lock — shared map)
-    if session_id and new_cli_sid and new_cli_sid != cli_sid:
+
+async def _drive_cli_text(args, c: Client, session_id, did, cwd, prompt, template):
+    """Generic CLI driver (codex/cursor/custom): runs the template in the session's worktree
+    and streams plain stdout. No structured deltas / usage; resume is the tool's own (cwd +
+    its --last/--resume flag in the template). Returns (ok, final_text, None, None)."""
+    cmd = _win_wrap(build_custom_cmd(template, prompt))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=cwd, limit=8 * 1024 * 1024,
+        )
+    except FileNotFoundError:
+        return False, f"executor not found: {cmd[0]}", None, None
+
+    stderr_chunks: list[str] = []
+    stderr_task = asyncio.create_task(_drain(proc.stderr, stderr_chunks))
+    tail: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+
+    async def flush():
+        nonlocal buf, buf_len
+        if buf:
+            await c.append_output("".join(buf), session_id, did)
+            buf, buf_len = [], 0
+
+    try:
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace")
+            t = line.rstrip("\n")
+            if t:
+                tail.append(t)
+                if len(tail) > 50:
+                    del tail[:-50]
+            buf.append(line); buf_len += len(line)
+            if buf_len >= 200:
+                await flush()
+    except Exception as e:  # noqa: BLE001
+        stderr_chunks.append(f"[stream read error: {e}]")
+    await flush()
+    await proc.wait()
+    await stderr_task
+    stderr = "".join(stderr_chunks)
+
+    ok = proc.returncode == 0
+    final_text = "\n".join(tail).strip()
+    if not ok:
+        final_text = ((final_text + "\n" + stderr).strip() or f"exit {proc.returncode}")[:4000]
+    return ok, final_text[:8000], None, None
+
+
+# ── one directive (one thread turn) ──────────────────────────────────────────
+async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asyncio.Lock) -> None:
+    did = d["directive_id"]
+    session_id = d.get("session_id")
+    instruction = d["instruction"]
+    key = session_id or DEFAULT_KEY
+    prompt = EXEC_PROMPT.format(instruction=instruction)
+
+    cwd = await asyncio.to_thread(ensure_worktree, args, session_id) if session_id else None
+    cli_sid = sid_map.get(key)
+    template = resolve_template(args)
+
+    await c.heartbeat(f"thread {key[:6]}: {instruction[:32]}")
+    await c.append_output("▶ " + instruction[:200], session_id, did)
+
+    if args.dry_run:
+        ex = template or ("claude --model " + args.model)
+        await c.append_output(f"[dry-run] would run `{ex}` (resume={bool(cli_sid)}) in {cwd or 'cwd'}",
+                              session_id, did)
+        await c.report(did, "done", "[dry-run]", "[dry-run]")
+        return
+
+    if template is None:
+        ok, final_text, new_cli_sid, usage = await _drive_claude(args, c, session_id, did, cli_sid, cwd, prompt)
+    else:
+        ok, final_text, new_cli_sid, usage = await _drive_cli_text(args, c, session_id, did, cwd, prompt, template)
+
+    # persist the thread's resumable session id (claude only; under the lock — shared map)
+    if new_cli_sid and new_cli_sid != cli_sid:
         async with lock:
             sid_map[key] = new_cli_sid
             await asyncio.to_thread(save_sid_map, args, sid_map)
-        await c.set_executor(session_id, new_cli_sid, cwd)
-    elif new_cli_sid and new_cli_sid != cli_sid:   # default thread (no server session row)
-        async with lock:
-            sid_map[key] = new_cli_sid
-            await asyncio.to_thread(save_sid_map, args, sid_map)
-
-    usage = extract_usage(result_obj or {}, args.model)
+        if session_id:
+            await c.set_executor(session_id, new_cli_sid, cwd)
     if usage:
         await c.report_usage(usage, session_id, did)
 
@@ -420,6 +496,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--token", default=os.environ.get("ATMCP_TOKEN"), required=not os.environ.get("ATMCP_TOKEN"))
     ap.add_argument("--name", default=os.environ.get("ATMCP_NAME"), required=not os.environ.get("ATMCP_NAME"))
     ap.add_argument("--model", default=os.environ.get("ATMCP_MODEL", "opus"))
+    ap.add_argument("--executor", default=os.environ.get("ATMCP_EXECUTOR", "claude"),
+                    choices=["claude", "codex", "cursor"],
+                    help="executor bound to this agent. claude = structured streaming + usage; "
+                         "codex/cursor = generic CLI streaming (per-session worktree + the tool's "
+                         "own resume flag). Override the command with --executor-cmd.")
+    ap.add_argument("--executor-cmd", default=os.environ.get("ATMCP_EXECUTOR_CMD"),
+                    help="custom CLI template with a {prompt} token (wins over --executor), e.g. "
+                         "\"codex exec resume --last {prompt}\" / \"cursor-agent -p --resume {prompt}\"")
     ap.add_argument("--base-repo", default=os.environ.get("ATMCP_BASE_REPO"),
                     help="git repo to base per-session worktrees on (omit = run in process cwd)")
     ap.add_argument("--state-dir", default=os.environ.get("ATMCP_STATE_DIR", "~/.atmcp"))

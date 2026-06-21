@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 _PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts", "atmcp_workbench_host.py"))
@@ -120,6 +121,43 @@ def test_worktree_non_git_makes_separate_dir(tmp_path):
     args = SimpleNamespace(base_repo=str(base), state_dir=str(tmp_path / "state"), team="t", name="bob")
     p = host.ensure_worktree(args, "sess-xyz")
     assert p and os.path.isdir(p) and p != str(base)
+
+
+# ── Phase 2: codex/cursor CLI-text driver ────────────────────────────────────
+def test_resolve_template():
+    assert host.resolve_template(SimpleNamespace(executor="claude", executor_cmd=None)) is None
+    assert host.resolve_template(SimpleNamespace(executor="codex", executor_cmd=None)) == host.DEFAULT_TEMPLATES["codex"]
+    assert host.resolve_template(SimpleNamespace(executor="cursor", executor_cmd=None)) == host.DEFAULT_TEMPLATES["cursor"]
+    # an explicit --executor-cmd wins over the named executor
+    assert host.resolve_template(SimpleNamespace(executor="codex", executor_cmd="x {prompt}")) == "x {prompt}"
+
+
+def test_custom_cmd_argv_safe_against_injection():
+    evil = "a; rm -rf / #"
+    cmd = host.build_custom_cmd("codex exec resume --last {prompt}", evil)
+    assert cmd[:4] == ["codex", "exec", "resume", "--last"]
+    assert cmd[-1] == evil and sum(1 for p in cmd if evil in p) == 1   # malicious text stays one argv elem
+
+
+def test_custom_cmd_appends_prompt_without_token():
+    cmd = host.build_custom_cmd("mytool run", "hi")
+    assert cmd[:2] == ["mytool", "run"] and cmd[-1] == "hi"
+
+
+async def test_drive_cli_text_streams_and_reports(tmp_path):
+    fake = tmp_path / "faketool.py"
+    fake.write_text("print('line one')\nprint('line two')\n")
+    template = f"{sys.executable} {fake} {{prompt}}"
+
+    class Stub:
+        def __init__(self): self.out = []
+        async def append_output(self, text, sid, did): self.out.append(text)
+
+    c = Stub()
+    ok, final, sid, usage = await host._drive_cli_text(None, c, "s1", "d1", None, "do it", template)
+    assert ok and sid is None and usage is None                 # CLI driver: no session id / usage
+    assert "line one" in "".join(c.out)                          # streamed to the thread
+    assert "line two" in final                                   # tail used for the report
 
 
 def test_worktree_git_adds_real_worktree(tmp_path):
