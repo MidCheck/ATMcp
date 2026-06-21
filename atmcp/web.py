@@ -341,6 +341,30 @@ def register(app: FastAPI) -> None:
         team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
         return await sessions_svc.archive_session(team["team_id"], session_id)
 
+    @app.get("/api/teams/{team_name}/sessions/{session_id}/memory")
+    async def session_get_memory(
+        team_name: str, session_id: str,
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Worker reads a thread's server-stored API-model conversation memory (join token)."""
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token)
+        msgs = await sessions_svc.get_messages(team["team_id"], session_id)
+        if msgs is None:
+            raise HTTPException(status_code=404, detail="unknown session")
+        return {"messages": msgs}
+
+    @app.post("/api/teams/{team_name}/sessions/{session_id}/memory")
+    async def session_set_memory(
+        team_name: str, session_id: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        msgs = b.get("messages")
+        if not isinstance(msgs, list):
+            raise HTTPException(status_code=400, detail="messages (list) required")
+        return await sessions_svc.set_messages(team["team_id"], session_id, msgs)
+
     @app.post("/api/teams/{team_name}/sessions/{session_id}/executor")
     async def session_executor_state(
         team_name: str, session_id: str, body: dict[str, Any],

@@ -250,9 +250,11 @@ async def test_drive_openai_agent_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(host, "_openai_round", fake_round)
 
     class Stub:
-        def __init__(self): self.out = []
+        def __init__(self): self.out = []; self.mem = None
         async def append_output(self, t, sid, did): self.out.append(t)
         async def guard_check(self, *a, **k): return {"decision": "allow"}
+        async def get_memory(self, sid): return self.mem
+        async def set_memory(self, sid, msgs): self.mem = msgs; return True
 
     c = Stub()
     args = SimpleNamespace(model="qwen", api_base="x", api_key="k", max_steps=8,
@@ -261,7 +263,28 @@ async def test_drive_openai_agent_loop(tmp_path, monkeypatch):
     assert ok and final == "All done." and sid is None
     assert usage["input_tokens"] == 22 and usage["output_tokens"] == 8     # summed across rounds
     assert any("hello" in o for o in c.out)                                 # the bash tool actually ran
-    assert host.load_messages(args, "s1")                                   # memory persisted for the thread
+    assert c.mem and c.mem[-1]["content"] == "All done."                    # memory persisted SERVER-side
+
+
+async def test_memory_prefers_server_falls_back_local(tmp_path):
+    args = SimpleNamespace(state_dir=str(tmp_path), team="t", name="bob")
+
+    class Srv:
+        async def get_memory(self, sid): return [{"role": "user", "content": "from server"}]
+        async def set_memory(self, sid, msgs): return True
+    m = await host.load_thread_memory(args, Srv(), "s1", "s1")
+    assert m[0]["content"] == "from server"                                 # server wins for a session
+
+    class Down:
+        async def get_memory(self, sid): return None
+        async def set_memory(self, sid, msgs): return False
+    host.save_messages(args, "s1", [{"role": "user", "content": "cached"}])
+    m2 = await host.load_thread_memory(args, Down(), "s1", "s1")
+    assert m2[0]["content"] == "cached"                                     # falls back to local file
+    # default thread (no session_id) is always local
+    host.save_messages(args, host.DEFAULT_KEY, [{"role": "user", "content": "deftxt"}])
+    m3 = await host.load_thread_memory(args, Srv(), host.DEFAULT_KEY, None)
+    assert m3[0]["content"] == "deftxt"
 
 
 def test_worktree_git_adds_real_worktree(tmp_path):

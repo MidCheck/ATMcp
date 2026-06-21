@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   driver         TEXT,                          -- executor kind (claude|codex|cursor|openai-compat)
   cli_session_id TEXT,                          -- executor's resumable session id (set by worker)
   worktree       TEXT,                          -- per-session working dir (set by worker)
+  messages_json  TEXT,                          -- API-model conversation memory (server-stored → cross-host)
   status         TEXT NOT NULL DEFAULT 'active',-- active|archived
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL,

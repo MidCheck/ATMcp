@@ -137,6 +137,36 @@ async def set_executor_state(
     return {"ok": True, "session_id": session_id}
 
 
+async def get_messages(team_id: str, session_id: str) -> list[dict[str, Any]] | None:
+    """Server-stored API-model conversation memory for a thread (cross-host)."""
+    row = await db.fetchone(
+        "SELECT messages_json FROM sessions WHERE team_id=? AND session_id=?",
+        (team_id, session_id),
+    )
+    if row is None:
+        return None
+    raw = row["messages_json"]
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+
+
+async def set_messages(team_id: str, session_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    now = now_ms()
+    payload = json.dumps(messages or [])
+    async with db.transaction() as tx:
+        cur = await tx.execute(
+            "UPDATE sessions SET messages_json=?, updated_at=? WHERE team_id=? AND session_id=?",
+            (payload, now, team_id, session_id),
+        )
+        if cur.rowcount != 1:
+            return {"ok": False, "error": "unknown_session"}
+    return {"ok": True, "session_id": session_id, "count": len(messages or [])}
+
+
 async def session_output(
     team_id: str, session_id: str, since_seq: int = 0, wait_ms: int = 0, limit: int = 300
 ) -> dict[str, Any]:

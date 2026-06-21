@@ -147,6 +147,30 @@ async def test_session_busy_reflects_pending_directive(team):
     assert s["busy"] is False and s["last_status"] == "done"                     # terminal → idle/done
 
 
+async def test_session_messages_store_roundtrip(team):
+    tid = team["team_id"]
+    bob = await join(team, "bob")
+    sid = (await sessions_svc.create_session(tid, bob.agent_id, "t"))["session_id"]
+    assert await sessions_svc.get_messages(tid, sid) == []          # new session: empty, not None
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
+    assert (await sessions_svc.set_messages(tid, sid, msgs))["ok"]
+    assert await sessions_svc.get_messages(tid, sid) == msgs        # cross-host memory persists
+    assert await sessions_svc.get_messages(tid, "nope") is None     # unknown session
+
+
+async def test_rest_session_memory(client):
+    async with client as c:
+        team = (await c.post("/api/teams", json={"name": "wb"},
+                             headers={"X-Admin-Token": settings.admin_token})).json()
+        jt = team["join_token"]; auth = {"Authorization": f"Bearer {jt}"}
+        await c.post("/api/teams/wb/heartbeat", json={"display_name": "bob"}, headers=auth)
+        sid = (await c.post("/api/teams/wb/sessions", json={"agent": "bob"}, headers=auth)).json()["session_id"]
+        msgs = [{"role": "user", "content": "remember me"}]
+        assert (await c.post(f"/api/teams/wb/sessions/{sid}/memory", json={"messages": msgs}, headers=auth)).json()["ok"]
+        assert (await c.get(f"/api/teams/wb/sessions/{sid}/memory", headers=auth)).json()["messages"] == msgs
+        assert (await c.get(f"/api/teams/wb/sessions/{sid}/memory")).status_code == 401   # needs join token
+
+
 async def test_workbench_page_served(client):
     async with client as c:
         r = await c.get("/workbench")

@@ -221,6 +221,21 @@ class Client:
         except Exception:
             return None
 
+    async def get_memory(self, session_id: str) -> list | None:
+        try:
+            r = await self.req("GET", f"/api/teams/{self.team}/sessions/{session_id}/memory")
+            return r.get("messages") or []
+        except Exception:
+            return None
+
+    async def set_memory(self, session_id: str, messages: list) -> bool:
+        try:
+            r = await self.req("POST", f"/api/teams/{self.team}/sessions/{session_id}/memory",
+                               {"messages": messages})
+            return bool(r.get("ok"))
+        except Exception:
+            return False
+
 
 # ── per-session local state (resume id map) + worktrees ──────────────────────
 def _state_path(args) -> str:
@@ -615,11 +630,29 @@ def save_messages(args, key: str, msgs: list[dict]) -> None:
         pass
 
 
+async def load_thread_memory(args, c: Client, key: str, session_id) -> list[dict]:
+    """Prefer SERVER-stored memory (cross-host) for real sessions; fall back to the local file
+    if the server is unreachable. The default thread (no session_id) stays local."""
+    if session_id:
+        srv = await c.get_memory(session_id)
+        if srv is not None:
+            return srv
+    return load_messages(args, key)
+
+
+async def save_thread_memory(args, c: Client, key: str, session_id, msgs: list[dict]) -> None:
+    msgs = msgs[-40:]   # bound memory
+    saved = await c.set_memory(session_id, msgs) if session_id else False
+    if not saved:       # default thread, or server unreachable → keep a local copy
+        await asyncio.to_thread(save_messages, args, key, msgs)
+
+
 async def _drive_openai(args, c: Client, session_id, did, key, cwd, prompt, lock: asyncio.Lock):
     """Agent loop for an OpenAI-compatible endpoint (Ollama, …). Memory = the per-thread message
-    history we store and replay (the model is stateless). Tool calls run in the worktree and pass
-    through Command Guard. Returns (ok, final_text, None, usage)."""
-    msgs = load_messages(args, key) or [{"role": "system", "content": OPENAI_SYSTEM}]
+    history we store and replay (the model is stateless), persisted SERVER-SIDE for real sessions
+    so it survives a host/device change. Tool calls run in the worktree and pass through Command
+    Guard. Returns (ok, final_text, None, usage)."""
+    msgs = await load_thread_memory(args, c, key, session_id) or [{"role": "system", "content": OPENAI_SYSTEM}]
     msgs.append({"role": "user", "content": prompt})
     total_in = total_out = 0
     final_text = ""
@@ -656,7 +689,7 @@ async def _drive_openai(args, c: Client, session_id, did, key, cwd, prompt, lock
         final_text = (final_text + "\n[stopped: max steps reached]").strip()
 
     async with lock:
-        await asyncio.to_thread(save_messages, args, key, msgs[-40:])   # bound memory
+        await save_thread_memory(args, c, key, session_id, msgs)
     usage = None
     if total_in or total_out:
         usage = {"model": args.model, "input_tokens": total_in, "output_tokens": total_out,

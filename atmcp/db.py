@@ -76,6 +76,12 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         await cur.close()
         if cols and "session_id" not in cols:
             await conn.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
+    # sessions.messages_json (server-stored API-model memory) on pre-existing DBs.
+    cur = await conn.execute("PRAGMA table_info(sessions)")
+    scols = [r[1] for r in await cur.fetchall()]
+    await cur.close()
+    if scols and "messages_json" not in scols:
+        await conn.execute("ALTER TABLE sessions ADD COLUMN messages_json TEXT")
     # Index on the (now-guaranteed) session_id column — created here, not in schema.sql,
     # so it never references the column before an ALTER adds it to an old table.
     await conn.execute(
