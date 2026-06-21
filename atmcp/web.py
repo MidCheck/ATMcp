@@ -20,6 +20,7 @@ from atmcp.ids import hash_token, token_matches
 from atmcp.session import Caller
 from atmcp.services import console as console_svc
 from atmcp.services import directives as directives_svc
+from atmcp.services import guard as guard_svc
 from atmcp.services import identity as identity_svc
 from atmcp.services import output as output_svc
 from atmcp.services import presence as presence_svc
@@ -351,6 +352,61 @@ def register(app: FastAPI) -> None:
         return await sessions_svc.set_executor_state(
             team["team_id"], session_id, b.get("cli_session_id"), b.get("worktree")
         )
+
+    # ── Command Guard: tool-call safety gate (esp. for local models running Bash) ──
+    @app.post("/api/teams/{team_name}/guard/check")
+    async def guard_check(
+        team_name: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        command = b.get("command")
+        if not command:
+            raise HTTPException(status_code=400, detail="command required")
+        agent_id = None
+        if b.get("agent"):
+            agent_id = await identity_svc.resolve_agent_ref(team["team_id"], b["agent"])
+        return await guard_svc.check(team["team_id"], agent_id, command, b.get("tool"), b.get("session_id"))
+
+    @app.get("/api/teams/{team_name}/guard/events")
+    async def guard_events(team_name: str, decision: str | None = None, limit: int = 100,
+                           token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        items = await guard_svc.recent_events(team["team_id"], limit, decision)
+        return {"events": items, "count": len(items)}
+
+    @app.get("/api/teams/{team_name}/guard/rules")
+    async def guard_rules_list(team_name: str, token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        rules = await guard_svc.list_rules(team["team_id"])
+        return {"rules": rules, "count": len(rules)}
+
+    @app.post("/api/teams/{team_name}/guard/rules")
+    async def guard_rules_add(
+        team_name: str, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        return await guard_svc.add_rule(
+            team["team_id"], b.get("kind", ""), b.get("pattern", ""),
+            b.get("pattern_type", "substring"), b.get("reason"),
+        )
+
+    @app.delete("/api/teams/{team_name}/guard/rules/{rule_id}")
+    async def guard_rules_delete(
+        team_name: str, rule_id: int,
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token)
+        return await guard_svc.delete_rule(team["team_id"], rule_id)
 
     @app.post("/api/teams/{team_name}/heartbeat")
     async def rest_heartbeat(

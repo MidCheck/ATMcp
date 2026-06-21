@@ -256,6 +256,36 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS idx_usage_team_ts    ON usage_events(team_id, ts);
 CREATE INDEX IF NOT EXISTS idx_usage_team_agent ON usage_events(team_id, agent_id, ts);
 
+-- ── Command Guard: allow/deny rules + an append-only audit of every check ────
+-- A safety gate for tool calls (esp. shell) made by agents — critical once local
+-- models run Bash. guard_rules = per-team allow/deny patterns; guard_events = the
+-- audit trail (what was checked, the verdict, the matched rule). Pruned by the reaper.
+CREATE TABLE IF NOT EXISTS guard_rules (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id      TEXT NOT NULL,
+  kind         TEXT NOT NULL,                      -- allow | deny
+  pattern      TEXT NOT NULL,
+  pattern_type TEXT NOT NULL DEFAULT 'substring',  -- substring | regex
+  reason       TEXT,
+  enabled      INTEGER NOT NULL DEFAULT 1,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guard_rules_team ON guard_rules(team_id, enabled);
+
+CREATE TABLE IF NOT EXISTS guard_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id    TEXT NOT NULL,
+  agent_id   TEXT,
+  session_id TEXT,
+  tool       TEXT,
+  command    TEXT NOT NULL,
+  decision   TEXT NOT NULL,                        -- allow | deny
+  reason     TEXT,
+  rule       TEXT,                                 -- which rule matched (builtin:/team:<id>)
+  ts         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guard_events_team ON guard_events(team_id, ts);
+
 -- ── Events: monotonic activity log (audit + replay + dashboard feed) ─────────
 CREATE TABLE IF NOT EXISTS events (
   event_id     INTEGER PRIMARY KEY AUTOINCREMENT,

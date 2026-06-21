@@ -54,5 +54,8 @@ class Settings:
     # enough to back the widest rolling window; default 30 days.
     usage_retention_s: int = _int("ATMCP_USAGE_RETENTION_S", 2592000)
 
+    # Command Guard audit retention (default 30 days).
+    guard_retention_s: int = _int("ATMCP_GUARD_RETENTION_S", 2592000)
+
 
 settings = Settings()
