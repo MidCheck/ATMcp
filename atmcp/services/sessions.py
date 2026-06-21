@@ -49,20 +49,24 @@ async def create_session(
 
 _BUSY = ("SELECT 1 FROM directives d WHERE d.team_id=s.team_id AND d.session_id=s.session_id "
          "AND d.status IN ('pending','running')")
+# status of the most recent turn in the thread (drives the persistent per-thread indicator)
+_LAST = ("SELECT d.status FROM directives d WHERE d.team_id=s.team_id AND d.session_id=s.session_id "
+         "ORDER BY d.created_at DESC, d.updated_at DESC LIMIT 1")
+
+
+def _decorate(d: dict[str, Any]) -> dict[str, Any]:
+    d["busy"] = bool(d.get("busy"))
+    return d
 
 
 async def get_session(team_id: str, session_id: str) -> dict[str, Any] | None:
     r = await db.fetchone(
         "SELECT s.session_id,s.team_id,s.agent_id,s.title,s.driver,s.cli_session_id,s.worktree,"
-        f"s.status,s.created_at,s.updated_at, EXISTS({_BUSY}) AS busy "
+        f"s.status,s.created_at,s.updated_at, EXISTS({_BUSY}) AS busy, ({_LAST}) AS last_status "
         "FROM sessions s WHERE s.team_id=? AND s.session_id=?",
         (team_id, session_id),
     )
-    if r is None:
-        return None
-    d = _row(r)
-    d["busy"] = bool(d.get("busy"))
-    return d
+    return _decorate(_row(r)) if r is not None else None
 
 
 async def list_sessions(
@@ -78,17 +82,12 @@ async def list_sessions(
     params.append(max(1, min(int(limit or 200), 500)))
     rows = await db.fetchall(
         "SELECT s.session_id,s.agent_id,s.title,s.driver,s.status,s.created_at,s.updated_at, "
-        f"EXISTS({_BUSY}) AS busy FROM sessions s "
+        f"EXISTS({_BUSY}) AS busy, ({_LAST}) AS last_status FROM sessions s "
         f"WHERE {' AND '.join('s.' + c if not c.startswith('s.') else c for c in clauses)} "
         "ORDER BY s.updated_at DESC LIMIT ?",
         params,
     )
-    out = []
-    for r in rows:
-        d = _row(r)
-        d["busy"] = bool(d.get("busy"))
-        out.append(d)
-    return out
+    return [_decorate(_row(r)) for r in rows]
 
 
 async def rename_session(team_id: str, session_id: str, title: str) -> dict[str, Any]:

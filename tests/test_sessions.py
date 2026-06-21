@@ -136,13 +136,15 @@ async def test_session_busy_reflects_pending_directive(team):
     assert (await sessions_svc.get_session(tid, sid))["busy"] is False
 
     did = (await directives_svc.send_directive(console, "bob", "x", session_id=sid))["directive_id"]
-    assert (await sessions_svc.get_session(tid, sid))["busy"] is True            # pending → busy
-    assert (await sessions_svc.list_sessions(tid, bob.agent_id))[0]["busy"] is True
+    s = await sessions_svc.get_session(tid, sid)
+    assert s["busy"] is True and s["last_status"] == "pending"                   # pending → busy
+    assert (await sessions_svc.list_sessions(tid, bob.agent_id))[0]["last_status"] == "pending"
 
     await directives_svc.claim_directive(bob, did)
-    assert (await sessions_svc.get_session(tid, sid))["busy"] is True            # running → busy
+    assert (await sessions_svc.get_session(tid, sid))["last_status"] == "running"
     await directives_svc.report_directive(bob, did, "done", "ok")
-    assert (await sessions_svc.get_session(tid, sid))["busy"] is False           # terminal → idle
+    s = await sessions_svc.get_session(tid, sid)
+    assert s["busy"] is False and s["last_status"] == "done"                     # terminal → idle/done
 
 
 async def test_workbench_page_served(client):

@@ -77,10 +77,11 @@ function renderTree() {
     const rows = sess.length
       ? sess.map((s) => {
           const sel = current && current.session_id === s.session_id ? " sel" : "";
-          const label = s.busy ? "working…" : s.status;
+          const st = statusOf(s);
+          const cls = { working: "running", done: "done", failed: "failed" }[st] || "";
           return `<div class="sess${sel}" data-sid="${esc(s.session_id)}" data-aid="${esc(a.agent_id)}">
             <span class="stitle">${esc(s.title)}</span>
-            <span class="sstat${s.busy ? " running" : ""}">${esc(label)}</span></div>`;
+            <span class="sstat ${cls}">${esc(STATUS_LABEL[st])}</span></div>`;
         }).join("")
       : '<div class="empty">no sessions — + to start</div>';
     return `<div class="agentnode${open}" data-aid="${esc(a.agent_id)}">
@@ -146,7 +147,7 @@ async function selectSession(sid, aid) {
     if (mine !== selectToken) return;
     current.title = d.session.title;
     el("crumb").innerHTML = `${esc(agent ? agent.display_name : "")} <span class="mut">/</span> ${esc(d.session.title)}`;
-    setSessStatus(d.session.busy ? "working" : "idle");
+    setSessStatus(statusOf(d.session));   // persistent: reflects the thread's last turn
     // merge user messages (directives) + output by timestamp into a flowing transcript
     const items = [];
     (d.directives || []).forEach((x) => items.push({ ts: x.created_at, role: "you", text: x.instruction }));
@@ -227,12 +228,20 @@ function toggleSidebar() { el("sidebar").classList.toggle("collapsed"); }
 window.toggleSidebar = toggleSidebar;
 
 // ── per-session status indicator + desktop notification ────────────────────────
+const STATUS_LABEL = { working: "working…", done: "✓ done", failed: "✗ failed", idle: "idle", new: "new" };
+function statusOf(s) {
+  const ls = s && s.last_status;
+  if (ls === "pending" || ls === "running") return "working";
+  if (ls === "done") return "done";
+  if (ls === "failed") return "failed";
+  return ls ? "idle" : "new";   // canceled → idle, no turns yet → new
+}
 function setSessStatus(state) {
   const p = el("sessStatus");
-  const map = { working: "● working…", done: "✓ done", failed: "✗ failed", idle: "idle" };
+  const map = { working: "● working…", done: "✓ done", failed: "✗ failed", idle: "idle", new: "new" };
   if (!state) { p.style.display = "none"; return; }
   p.style.display = "";
-  p.className = "pill sstatpill " + state;
+  p.className = "pill sstatpill " + (state === "working" ? "working" : state === "done" ? "done" : state === "failed" ? "failed" : "");
   p.textContent = map[state] || state;
 }
 function sessName(sid) {
@@ -310,9 +319,7 @@ function start() {
   el("dashLink").href = "/dashboard?team=" + encodeURIComponent(TEAM);
   loadToken();
   wireTree();
-  el("input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-  });
+  // Enter inserts a newline; sending is explicit (the Send button) — no keydown handler.
   refreshTree().then(connectWS);
   setInterval(refreshTree, 8000);
 }

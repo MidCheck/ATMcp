@@ -53,6 +53,8 @@
     .sess .sstat { font-size:10px; color:var(--muted); }
     .sess .sstat.running { color:var(--amber); }
     .sess .sstat.running::before { content:"● "; animation:pulse 1.1s ease-in-out infinite; }
+    .sess .sstat.done { color:var(--green); }
+    .sess .sstat.failed { color:var(--red); }
     @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.25;} }
     .sstatpill.working { color:var(--amber); border-color:var(--amber); }
     .sstatpill.done { color:var(--green); border-color:var(--green); }
@@ -125,7 +127,7 @@
         </div>
         <div class="composer">
           <div class="row">
-            <textarea id="input" placeholder="Message the agent in this session…  (Enter to send, Shift+Enter for newline)" disabled></textarea>
+            <textarea id="input" placeholder="Message the agent in this session…  (Enter = newline · click Send to send)" disabled></textarea>
             <button id="sendBtn" onclick="send()" disabled>Send</button>
           </div>
           <div class="tokrow">
