@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -211,6 +212,14 @@ class Client:
                            {"cli_session_id": cli_session_id, "worktree": worktree})
         except Exception:
             pass
+
+    async def guard_check(self, command: str, session_id: str | None, tool: str = "run_bash") -> dict | None:
+        try:
+            return await self.req("POST", f"/api/teams/{self.team}/guard/check",
+                                  {"command": command, "agent": self.name,
+                                   "session_id": session_id, "tool": tool})
+        except Exception:
+            return None
 
 
 # ── per-session local state (resume id map) + worktrees ──────────────────────
@@ -405,6 +414,185 @@ async def _drive_cli_text(args, c: Client, session_id, did, cwd, prompt, templat
     return ok, final_text[:8000], None, None
 
 
+# ── OpenAI-compatible driver (Ollama etc.): tool-calling agent loop ───────────
+OPENAI_SYSTEM = (
+    "You are an autonomous coding agent on a team, working inside an isolated git worktree. "
+    "Use the provided tools to inspect/modify files and run shell commands to accomplish the "
+    "user's request. Work in small, verifiable steps. When finished, reply with a concise "
+    "summary and DO NOT call a tool."
+)
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "run_bash", "description": "Run a bash command in the worktree and return its output.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}},
+                       "required": ["command"]}}},
+    {"type": "function", "function": {
+        "name": "read_file", "description": "Read a UTF-8 text file (path relative to the worktree).",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "write_file", "description": "Write a UTF-8 text file (path relative to the worktree).",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                       "required": ["path", "content"]}}},
+]
+
+# Minimal offline fail-closed deny-list (subset of the server guard's, kept in sync by hand) —
+# used only when the server guard is unreachable, so a dangerous command is still blocked.
+_LOCAL_DENY = [re.compile(p, re.I) for p in (
+    r"\brm\s+-[a-z]*[rf][a-z]*\s+(?:-[a-z]+\s+)*(?:/|~|\$HOME)(?:\s|/|\*|$)",
+    r"\brm\s+-[a-z]*[rf][a-z]*\s+(?:-[a-z]+\s+)*[/~]?\*",
+    r":\(\)\s*\{\s*:\s*\|\s*:?\s*&\s*\}\s*;\s*:",
+    r"\bmkfs", r"\bdd\b[^\n]*\bof=/dev/", r">\s*/dev/(sd|nvme|disk|hd)",
+    r"\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(sh|bash|zsh)\b",
+    r"(^|\s|;|&|\|)sudo\s", r"\b(shutdown|reboot|halt|poweroff)\b",
+    r"(\.ssh/|\.aws/credentials|id_rsa|id_ed25519|authorized_keys)",
+)]
+
+
+def local_guard_deny(cmd: str) -> bool:
+    return any(rx.search(cmd or "") for rx in _LOCAL_DENY)
+
+
+async def guard_allows(c: Client, command: str, session_id) -> tuple[bool, str | None]:
+    """Server guard decides; if it's unreachable, fall back to the local deny-list (fail-closed
+    on dangerous commands)."""
+    v = await c.guard_check(command, session_id)
+    if v is not None:
+        return (v.get("decision") != "deny", v.get("reason"))
+    if local_guard_deny(command):
+        return (False, "blocked by local deny-list (guard offline)")
+    return (True, None)
+
+
+def _safe_path(base: str, rel: str) -> str | None:
+    if not rel or os.path.isabs(rel):
+        return None
+    full = os.path.normpath(os.path.join(base, rel))
+    return full if (full == base or full.startswith(base + os.sep)) else None
+
+
+async def _run_tool(args, c: Client, session_id, cwd: str | None, name: str, a: dict) -> str:
+    base = cwd or os.getcwd()
+    if name == "run_bash":
+        cmd = a.get("command", "")
+        allowed, reason = await guard_allows(c, cmd, session_id)
+        if not allowed:
+            return f"BLOCKED by guard: {reason}"
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "bash", "-lc", cmd, cwd=base,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, limit=4 * 1024 * 1024)
+            out, _ = await asyncio.wait_for(p.communicate(), timeout=args.tool_timeout)
+            return out.decode(errors="replace")[:6000] or f"(exit {p.returncode})"
+        except asyncio.TimeoutError:
+            return "(tool timed out)"
+        except Exception as e:  # noqa: BLE001
+            return f"(error: {e})"
+    if name in ("read_file", "write_file"):
+        path = _safe_path(base, a.get("path", ""))
+        if path is None:
+            return "BLOCKED: path must be relative and stay inside the worktree"
+        try:
+            if name == "read_file":
+                return (await asyncio.to_thread(lambda: open(path, encoding="utf-8", errors="replace").read()))[:6000]
+            os.makedirs(os.path.dirname(path) or base, exist_ok=True)
+            await asyncio.to_thread(lambda: open(path, "w", encoding="utf-8").write(a.get("content", "")))
+            return f"wrote {a.get('path')}"
+        except Exception as e:  # noqa: BLE001
+            return f"(error: {e})"
+    return f"(unknown tool: {name})"
+
+
+def _openai_chat(args, msgs: list[dict]) -> dict:
+    body = {"model": args.model, "messages": msgs, "tools": TOOLS, "stream": False}
+    req = urllib.request.Request(
+        args.api_base.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + (args.api_key or "ollama")})
+    with urllib.request.urlopen(req, timeout=args.openai_timeout) as r:
+        return json.load(r)
+
+
+def _msgs_path(args, key: str) -> str:
+    safe = f"{args.team}__{args.name}__{key}".replace("/", "_")
+    return os.path.join(os.path.expanduser(args.state_dir), f"msgs__{safe}.json")
+
+
+def load_messages(args, key: str) -> list[dict]:
+    try:
+        with open(_msgs_path(args, key), encoding="utf-8") as f:
+            return json.load(f) or []
+    except Exception:
+        return []
+
+
+def save_messages(args, key: str, msgs: list[dict]) -> None:
+    path = _msgs_path(args, key)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(msgs, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _drive_openai(args, c: Client, session_id, did, key, cwd, prompt, lock: asyncio.Lock):
+    """Agent loop for an OpenAI-compatible endpoint (Ollama, …). Memory = the per-thread message
+    history we store and replay (the model is stateless). Tool calls run in the worktree and pass
+    through Command Guard. Returns (ok, final_text, None, usage)."""
+    msgs = load_messages(args, key) or [{"role": "system", "content": OPENAI_SYSTEM}]
+    msgs.append({"role": "user", "content": prompt})
+    total_in = total_out = 0
+    final_text = ""
+    ok = True
+    step = 0
+    for step in range(args.max_steps):
+        try:
+            resp = await asyncio.to_thread(_openai_chat, args, msgs)
+        except Exception as e:  # noqa: BLE001
+            ok, final_text = False, f"model call failed: {e}"
+            break
+        ch = (resp.get("choices") or [{}])[0]
+        m = ch.get("message") or {}
+        u = resp.get("usage") or {}
+        total_in += int(u.get("prompt_tokens") or 0)
+        total_out += int(u.get("completion_tokens") or 0)
+        content = m.get("content") or ""
+        tool_calls = m.get("tool_calls") or []
+        asst = {"role": "assistant", "content": content}
+        if tool_calls:
+            asst["tool_calls"] = tool_calls
+        msgs.append(asst)
+        if content:
+            await c.append_output(content, session_id, did)
+            final_text = content
+        if not tool_calls:
+            break
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            name = fn.get("name", "")
+            try:
+                a = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                a = {}
+            result = await _run_tool(args, c, session_id, cwd, name, a)
+            await c.append_output(f"🔧 {name} {json.dumps(a)[:160]} →\n{result[:1000]}", session_id, did)
+            msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": result[:6000]})
+    else:
+        ok = False
+        final_text = (final_text + "\n[stopped: max steps reached]").strip()
+
+    async with lock:
+        await asyncio.to_thread(save_messages, args, key, msgs[-40:])   # bound memory
+    usage = None
+    if total_in or total_out:
+        usage = {"model": args.model, "input_tokens": total_in, "output_tokens": total_out,
+                 "cache_read": 0, "cache_creation": 0, "cost_usd": 0.0, "num_turns": step + 1, "duration_ms": 0}
+    return ok, (final_text or "").strip()[:8000], None, usage
+
+
 # ── one directive (one thread turn) ──────────────────────────────────────────
 async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asyncio.Lock) -> None:
     did = d["directive_id"]
@@ -415,19 +603,22 @@ async def handle_directive(args, c: Client, d: dict, sid_map: dict, lock: asynci
 
     cwd = await asyncio.to_thread(ensure_worktree, args, session_id) if session_id else None
     cli_sid = sid_map.get(key)
-    template = resolve_template(args)
+    is_openai = args.executor == "openai"
+    template = None if is_openai else resolve_template(args)
 
     await c.heartbeat(f"thread {key[:6]}: {instruction[:32]}")
     await c.append_output("▶ " + instruction[:200], session_id, did)
 
     if args.dry_run:
-        ex = template or ("claude --model " + args.model)
+        ex = "openai " + args.model if is_openai else (template or ("claude --model " + args.model))
         await c.append_output(f"[dry-run] would run `{ex}` (resume={bool(cli_sid)}) in {cwd or 'cwd'}",
                               session_id, did)
         await c.report(did, "done", "[dry-run]", "[dry-run]")
         return
 
-    if template is None:
+    if is_openai:
+        ok, final_text, new_cli_sid, usage = await _drive_openai(args, c, session_id, did, key, cwd, prompt, lock)
+    elif template is None:
         ok, final_text, new_cli_sid, usage = await _drive_claude(args, c, session_id, did, cli_sid, cwd, prompt)
     else:
         ok, final_text, new_cli_sid, usage = await _drive_cli_text(args, c, session_id, did, cwd, prompt, template)
@@ -497,10 +688,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--name", default=os.environ.get("ATMCP_NAME"), required=not os.environ.get("ATMCP_NAME"))
     ap.add_argument("--model", default=os.environ.get("ATMCP_MODEL", "opus"))
     ap.add_argument("--executor", default=os.environ.get("ATMCP_EXECUTOR", "claude"),
-                    choices=["claude", "codex", "cursor"],
+                    choices=["claude", "codex", "cursor", "openai"],
                     help="executor bound to this agent. claude = structured streaming + usage; "
-                         "codex/cursor = generic CLI streaming (per-session worktree + the tool's "
-                         "own resume flag). Override the command with --executor-cmd.")
+                         "codex/cursor = generic CLI streaming; openai = OpenAI-compatible HTTP "
+                         "(Ollama/LM Studio/vLLM/hosted) with a tool-calling agent loop. Override a "
+                         "CLI command with --executor-cmd; configure HTTP with --api-base/--api-key.")
     ap.add_argument("--executor-cmd", default=os.environ.get("ATMCP_EXECUTOR_CMD"),
                     help="custom CLI template with a {prompt} token (wins over --executor), e.g. "
                          "\"codex exec resume --last {prompt}\" / \"cursor-agent -p --resume {prompt}\"")
@@ -511,6 +703,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--permission-mode", default=os.environ.get("ATMCP_PERMISSION_MODE", "acceptEdits"))
     ap.add_argument("--claude-args", default=os.environ.get("ATMCP_CLAUDE_ARGS", ""))
     ap.add_argument("--max-concurrent", type=int, default=int(os.environ.get("ATMCP_MAX_CONCURRENT") or 4))
+    # OpenAI-compatible executor (Ollama etc.)
+    ap.add_argument("--api-base", default=os.environ.get("ATMCP_API_BASE", "http://localhost:11434/v1"),
+                    help="OpenAI-compatible base URL (e.g. Ollama http://localhost:11434/v1)")
+    ap.add_argument("--api-key", default=os.environ.get("ATMCP_API_KEY", "ollama"),
+                    help="bearer key for the OpenAI-compatible endpoint (Ollama ignores it)")
+    ap.add_argument("--max-steps", type=int, default=int(os.environ.get("ATMCP_MAX_STEPS") or 12),
+                    help="max tool-calling rounds per turn (openai executor)")
+    ap.add_argument("--tool-timeout", type=float, default=float(os.environ.get("ATMCP_TOOL_TIMEOUT") or 120),
+                    help="per tool (bash) timeout in seconds (openai executor)")
+    ap.add_argument("--openai-timeout", type=float, default=float(os.environ.get("ATMCP_OPENAI_TIMEOUT") or 600),
+                    help="per model HTTP call timeout in seconds (openai executor)")
     ap.add_argument("--wait-ms", type=int, default=30000)
     ap.add_argument("--idle-sleep", type=float, default=1.0)
     ap.add_argument("--dry-run", action="store_true")

@@ -3,6 +3,7 @@ and per-session worktree allocation (git + non-git + none)."""
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import subprocess
@@ -158,6 +159,79 @@ async def test_drive_cli_text_streams_and_reports(tmp_path):
     assert ok and sid is None and usage is None                 # CLI driver: no session id / usage
     assert "line one" in "".join(c.out)                          # streamed to the thread
     assert "line two" in final                                   # tail used for the report
+
+
+# ── Phase 3: OpenAI-compat driver (tools, guard, agent loop) ─────────────────
+def test_safe_path(tmp_path):
+    base = str(tmp_path)
+    assert host._safe_path(base, "a/b.txt") == os.path.normpath(os.path.join(base, "a/b.txt"))
+    assert host._safe_path(base, "/etc/passwd") is None      # absolute rejected
+    assert host._safe_path(base, "../escape") is None         # parent escape rejected
+
+
+def test_local_guard_deny():
+    assert host.local_guard_deny("rm -rf /") is True
+    assert host.local_guard_deny("sudo reboot") is True
+    assert host.local_guard_deny("ls -la") is False
+
+
+async def test_guard_allows_offline_fallback():
+    class C:  # guard server unreachable
+        async def guard_check(self, *a, **k): return None
+    assert (await host.guard_allows(C(), "rm -rf /", "s"))[0] is False   # dangerous → denied offline
+    assert (await host.guard_allows(C(), "ls", "s"))[0] is True          # safe → allowed offline
+
+
+async def test_run_tool_bash_respects_guard(tmp_path):
+    args = SimpleNamespace(tool_timeout=30)
+
+    class Deny:
+        async def guard_check(self, *a, **k): return {"decision": "deny", "reason": "nope"}
+    out = await host._run_tool(args, Deny(), "s", str(tmp_path), "run_bash", {"command": "echo hi"})
+    assert out.startswith("BLOCKED by guard")
+
+    class Allow:
+        async def guard_check(self, *a, **k): return {"decision": "allow"}
+    out = await host._run_tool(args, Allow(), "s", str(tmp_path), "run_bash", {"command": "echo hi"})
+    assert "hi" in out
+
+
+async def test_run_tool_file_rw_and_escape(tmp_path):
+    args = SimpleNamespace(tool_timeout=30)
+
+    class C:
+        async def guard_check(self, *a, **k): return {"decision": "allow"}
+    c = C()
+    assert "wrote" in await host._run_tool(args, c, "s", str(tmp_path), "write_file", {"path": "x.txt", "content": "hi"})
+    assert await host._run_tool(args, c, "s", str(tmp_path), "read_file", {"path": "x.txt"}) == "hi"
+    assert "BLOCKED" in await host._run_tool(args, c, "s", str(tmp_path), "read_file", {"path": "/etc/hosts"})
+
+
+async def test_drive_openai_agent_loop(tmp_path, monkeypatch):
+    # scripted endpoint: round 1 calls run_bash, round 2 gives the final answer
+    responses = [
+        {"choices": [{"message": {"content": "", "tool_calls": [
+            {"id": "c1", "function": {"name": "run_bash", "arguments": "{\"command\": \"echo hello\"}"}}]}}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        {"choices": [{"message": {"content": "All done."}}],
+         "usage": {"prompt_tokens": 12, "completion_tokens": 3}},
+    ]
+    it = iter(responses)
+    monkeypatch.setattr(host, "_openai_chat", lambda args, msgs: next(it))
+
+    class Stub:
+        def __init__(self): self.out = []
+        async def append_output(self, t, sid, did): self.out.append(t)
+        async def guard_check(self, *a, **k): return {"decision": "allow"}
+
+    c = Stub()
+    args = SimpleNamespace(model="qwen", api_base="x", api_key="k", max_steps=8,
+                           tool_timeout=30, openai_timeout=60, state_dir=str(tmp_path), team="t", name="bob")
+    ok, final, sid, usage = await host._drive_openai(args, c, "s1", "d1", "s1", str(tmp_path), "list files", asyncio.Lock())
+    assert ok and final == "All done." and sid is None
+    assert usage["input_tokens"] == 22 and usage["output_tokens"] == 8     # summed across rounds
+    assert any("hello" in o for o in c.out)                                 # the bash tool actually ran
+    assert host.load_messages(args, "s1")                                   # memory persisted for the thread
 
 
 def test_worktree_git_adds_real_worktree(tmp_path):

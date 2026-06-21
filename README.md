@@ -252,8 +252,21 @@ python scripts/atmcp_workbench_host.py --url http://<host>:8000 \
   --team <team> --token <join_token> --name bob --base-repo ~/code/myrepo   # --dry-run to test
 ```
 
-See **[`docs/workbench-design.md`](docs/workbench-design.md)** for the full design and roadmap
-(codex/cursor/local-Ollama drivers, local-models-that-act, and more are planned phases).
+Pick the executor per agent with `--executor`: `claude` (default, structured streaming + usage),
+`codex` / `cursor` (generic CLI streaming; `--executor-cmd` to customize), or `openai` —
+**any OpenAI-compatible endpoint (Ollama / LM Studio / vLLM / hosted)** running a **tool-calling
+agent loop** so a local model can actually run Bash / edit files, e.g.:
+
+```bash
+python scripts/atmcp_workbench_host.py --team <team> --token <jt> --name qwen \
+  --executor openai --api-base http://localhost:11434/v1 --model qwen3.6:35b \
+  --base-repo ~/code/myrepo
+```
+
+Every tool call (especially shell) passes through **Command Guard** — a per-team allow/deny gate
+with a built-in dangerous-command deny-list (audited; `/guard/*` API) and a local fail-closed
+fallback if the guard is unreachable. See **[`docs/workbench-design.md`](docs/workbench-design.md)**
+for the full design and roadmap.
 
 ## Making agents actually use it
 
