@@ -403,6 +403,37 @@ def register(app: FastAPI) -> None:
         items = await guard_svc.recent_events(team["team_id"], limit, decision)
         return {"events": items, "count": len(items)}
 
+    @app.get("/api/teams/{team_name}/guard/requests")
+    async def guard_requests_list(team_name: str, token: str | None = None) -> dict[str, Any]:
+        team = await _team_by_name(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail="unknown team")
+        _check_dashboard(team, token)
+        items = await guard_svc.pending_requests(team["team_id"])
+        return {"requests": items, "count": len(items)}
+
+    @app.get("/api/teams/{team_name}/guard/requests/{request_id}")
+    async def guard_request_get(
+        team_name: str, request_id: int,
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Worker polls this for an 'ask' verdict (join token)."""
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token)
+        req = await guard_svc.get_request(team["team_id"], request_id)
+        if req is None:
+            raise HTTPException(status_code=404, detail="unknown request")
+        return req
+
+    @app.post("/api/teams/{team_name}/guard/requests/{request_id}/resolve")
+    async def guard_request_resolve(
+        team_name: str, request_id: int, body: dict[str, Any],
+        authorization: str | None = Header(default=None), x_atmcp_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        b = body or {}
+        team = await _require_join(team_name, _bearer(authorization) or x_atmcp_token or b.get("token"))
+        return await guard_svc.resolve_request(
+            team["team_id"], request_id, bool(b.get("approve")), b.get("by") or "dashboard")
+
     @app.get("/api/teams/{team_name}/guard/rules")
     async def guard_rules_list(team_name: str, token: str | None = None) -> dict[str, Any]:
         team = await _team_by_name(team_name)

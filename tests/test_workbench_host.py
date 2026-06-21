@@ -182,6 +182,28 @@ async def test_guard_allows_offline_fallback():
     assert (await host.guard_allows(C(), "ls", "s"))[0] is True          # safe → allowed offline
 
 
+async def test_guard_allows_ask_polls_until_resolved():
+    # decision=ask → poll the request until a human verdict
+    class C:
+        def __init__(self, verdict): self.verdict = verdict; self.polls = 0
+        async def guard_check(self, *a, **k): return {"decision": "ask", "request_id": 7}
+        async def get_guard_request(self, rid):
+            self.polls += 1
+            return {"status": "pending"} if self.polls < 2 else {"status": self.verdict}
+    ok, reason = await host.guard_allows(C("allowed"), "deploy", "s", ask_timeout=30)
+    assert ok is True
+    ok2, _ = await host.guard_allows(C("denied"), "deploy", "s", ask_timeout=30)
+    assert ok2 is False
+
+
+async def test_guard_allows_ask_timeout_fails_closed():
+    class C:
+        async def guard_check(self, *a, **k): return {"decision": "ask", "request_id": 1}
+        async def get_guard_request(self, rid): return {"status": "pending"}
+    ok, reason = await host.guard_allows(C(), "deploy", "s", ask_timeout=3)   # never resolves
+    assert ok is False and "timed out" in reason
+
+
 async def test_run_tool_bash_respects_guard(tmp_path):
     args = SimpleNamespace(tool_timeout=30)
 

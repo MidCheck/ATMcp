@@ -36,6 +36,8 @@ SESSION_CREATED = "session_created"
 SESSION_UPDATED = "session_updated"
 SESSION_ARCHIVED = "session_archived"
 GUARD_BLOCKED = "guard_blocked"
+GUARD_ASK = "guard_ask"
+GUARD_RESOLVED = "guard_resolved"
 
 
 async def append(

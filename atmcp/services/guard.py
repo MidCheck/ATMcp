@@ -83,13 +83,19 @@ async def check(
         b = match_builtin(cmd)
         if b:
             decision, reason, rule = "deny", b[1], f"builtin:{b[0]}"
-    if decision == "allow":
+    if decision == "allow":  # then ask rules (gray-zone → human approval)
+        for r in rules:
+            if r["kind"] == "ask" and _rule_matches(r["pattern"], r["pattern_type"], cmd):
+                decision, reason, rule = "ask", "team ask rule", f"team:{r['id']}"
+                break
+    if decision == "allow":  # then explicit allow rules (annotation only)
         for r in rules:
             if r["kind"] == "allow" and _rule_matches(r["pattern"], r["pattern_type"], cmd):
                 reason, rule = "team allow rule", f"team:{r['id']}"
                 break
 
     now = now_ms()
+    request_id = None
     async with db.transaction() as tx:
         await tx.execute(
             "INSERT INTO guard_events(team_id,agent_id,session_id,tool,command,decision,reason,rule,ts) "
@@ -101,14 +107,61 @@ async def check(
                 tx, team_id, events.GUARD_BLOCKED, "guard", None, agent_id,
                 {"command": cmd[:200], "reason": reason, "rule": rule, "session_id": session_id},
             )
-    return {"decision": decision, "reason": reason, "rule": rule}
+        elif decision == "ask":
+            cur = await tx.execute(
+                "INSERT INTO guard_requests(team_id,agent_id,session_id,tool,command,status,reason,created_at) "
+                "VALUES(?,?,?,?,?,'pending',?,?)",
+                (team_id, agent_id, session_id, tool, cmd[:2000], reason, now),
+            )
+            request_id = int(cur.lastrowid)
+            await events.append(
+                tx, team_id, events.GUARD_ASK, "guard", str(request_id), agent_id,
+                {"command": cmd[:200], "reason": reason, "session_id": session_id, "request_id": request_id},
+            )
+    return {"decision": decision, "reason": reason, "rule": rule, "request_id": request_id}
+
+
+async def get_request(team_id: str, request_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        "SELECT id,agent_id,session_id,tool,command,status,reason,resolved_by,created_at,resolved_at "
+        "FROM guard_requests WHERE team_id=? AND id=?",
+        (team_id, int(request_id)),
+    )
+    return {k: r[k] for k in r.keys()} if r is not None else None
+
+
+async def pending_requests(team_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    rows = await db.fetchall(
+        "SELECT id,agent_id,session_id,tool,command,reason,created_at FROM guard_requests "
+        "WHERE team_id=? AND status='pending' ORDER BY id DESC LIMIT ?",
+        (team_id, max(1, min(int(limit or 100), 200))),
+    )
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+async def resolve_request(team_id: str, request_id: int, approve: bool, by: str | None = None) -> dict[str, Any]:
+    status = "allowed" if approve else "denied"
+    now = now_ms()
+    async with db.transaction() as tx:
+        cur = await tx.execute(
+            "UPDATE guard_requests SET status=?, resolved_by=?, resolved_at=? "
+            "WHERE team_id=? AND id=? AND status='pending'",
+            (status, by, now, team_id, int(request_id)),
+        )
+        if cur.rowcount != 1:
+            return {"ok": False, "error": "not_pending_or_unknown"}
+        await events.append(
+            tx, team_id, events.GUARD_RESOLVED, "guard", str(request_id), by,
+            {"status": status, "request_id": int(request_id)},
+        )
+    return {"ok": True, "request_id": int(request_id), "status": status}
 
 
 async def add_rule(
     team_id: str, kind: str, pattern: str, pattern_type: str = "substring", reason: str | None = None
 ) -> dict[str, Any]:
-    if kind not in ("allow", "deny"):
-        return {"ok": False, "error": "kind must be allow|deny"}
+    if kind not in ("allow", "deny", "ask"):
+        return {"ok": False, "error": "kind must be allow|deny|ask"}
     if pattern_type not in ("substring", "regex"):
         return {"ok": False, "error": "pattern_type must be substring|regex"}
     if not (pattern or "").strip():
@@ -164,4 +217,9 @@ async def prune_expired(retention_ms: int) -> int:
     cutoff = now_ms() - retention_ms
     async with db.transaction() as tx:
         cur = await tx.execute("DELETE FROM guard_events WHERE ts < ?", (cutoff,))
-        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        n = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        # resolved requests past retention; stale 'pending' ones too (the worker has long since
+        # timed out → fail-closed), so the Security view doesn't accrue zombies.
+        await tx.execute("DELETE FROM guard_requests WHERE resolved_at IS NOT NULL AND resolved_at < ?", (cutoff,))
+        await tx.execute("DELETE FROM guard_requests WHERE status='pending' AND created_at < ?", (cutoff,))
+    return n

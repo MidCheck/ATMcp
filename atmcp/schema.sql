@@ -287,6 +287,24 @@ CREATE TABLE IF NOT EXISTS guard_events (
 );
 CREATE INDEX IF NOT EXISTS idx_guard_events_team ON guard_events(team_id, ts);
 
+-- A gray-zone command escalated for human approval (kind='ask' rule). The worker polls
+-- until it's resolved (or times out → fail-closed deny); the dashboard Security view
+-- shows pending requests with Approve/Deny.
+CREATE TABLE IF NOT EXISTS guard_requests (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id     TEXT NOT NULL,
+  agent_id    TEXT,
+  session_id  TEXT,
+  tool        TEXT,
+  command     TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',     -- pending | allowed | denied
+  reason      TEXT,
+  resolved_by TEXT,
+  created_at  INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_guard_requests_team ON guard_requests(team_id, status, id);
+
 -- ── Events: monotonic activity log (audit + replay + dashboard feed) ─────────
 CREATE TABLE IF NOT EXISTS events (
   event_id     INTEGER PRIMARY KEY AUTOINCREMENT,

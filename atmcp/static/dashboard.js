@@ -186,7 +186,7 @@ function prependEvent(e) {
 }
 
 // ── Center tabs ──────────────────────────────────────────────────────────────
-const TABS = ["board", "activity", "knowledge", "usage", "detail"];
+const TABS = ["board", "activity", "knowledge", "usage", "security", "detail"];
 function showTab(name) {
   TABS.forEach((t) => {
     const panel = el("tab-" + t);
@@ -194,8 +194,68 @@ function showTab(name) {
     if (panel) panel.style.display = t === name ? "" : "none";
     if (btn) btn.classList.toggle("active", t === name);
   });
+  if (name === "security") loadSecurity();
 }
 window.showTab = showTab;
+
+// ── Security view (Command Guard) ─────────────────────────────────────────────
+async function loadSecurity() {
+  try {
+    const [pend, rules, events] = await Promise.all([
+      fetch(withToken(`/api/teams/${encodeURIComponent(TEAM)}/guard/requests`)).then((r) => r.ok ? r.json() : { requests: [] }),
+      fetch(withToken(`/api/teams/${encodeURIComponent(TEAM)}/guard/rules`)).then((r) => r.ok ? r.json() : { rules: [] }),
+      fetch(withToken(`/api/teams/${encodeURIComponent(TEAM)}/guard/events?limit=60`)).then((r) => r.ok ? r.json() : { events: [] }),
+    ]);
+    el("guardPending").innerHTML = (pend.requests || []).length
+      ? pend.requests.map((q) => `<div class="grow ask">
+          <div class="cmd">${esc(q.command)}</div>
+          <div class="meta">${esc(q.reason || "ask")}${q.session_id ? " · session " + esc(String(q.session_id).slice(-6)) : ""}</div>
+          <div class="acts"><button class="btn-ok" onclick="resolveGuard(${q.id},true)">approve</button>
+            <button class="btn-no" onclick="resolveGuard(${q.id},false)">deny</button></div></div>`).join("")
+      : '<div class="empty">no pending approvals</div>';
+    el("guardRules").innerHTML = (rules.rules || []).length
+      ? rules.rules.map((r) => `<div class="rule"><span class="k ${esc(r.kind)}">${esc(r.kind)}</span>
+          <span class="p">${esc(r.pattern)}</span><span class="muted">${esc(r.pattern_type)}</span>
+          <span class="x" onclick="deleteGuardRule(${r.id})" title="delete">✕</span></div>`).join("")
+      : '<div class="empty">no custom rules (built-in deny-list still applies)</div>';
+    el("guardEvents").innerHTML = (events.events || []).length
+      ? events.events.map((e) => `<div class="gev"><span class="d ${esc(e.decision)}">${esc(e.decision)}</span>
+          <span class="c">${esc(e.command)}</span></div>`).join("")
+      : '<div class="empty">no checks yet</div>';
+  } catch (e) {}
+}
+
+async function resolveGuard(id, approve) {
+  if (!CMDTOKEN) { alert("set a join token (right panel) to approve/deny"); return; }
+  await fetch(`/api/teams/${encodeURIComponent(TEAM)}/guard/requests/${id}/resolve`, {
+    method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + CMDTOKEN },
+    body: JSON.stringify({ approve, by: "dashboard" }),
+  });
+  loadSecurity();
+}
+window.resolveGuard = resolveGuard;
+
+async function addGuardRule() {
+  if (!CMDTOKEN) { alert("set a join token (right panel) to add rules"); return; }
+  const pattern = el("rulePattern").value.trim();
+  if (!pattern) return;
+  await fetch(`/api/teams/${encodeURIComponent(TEAM)}/guard/rules`, {
+    method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + CMDTOKEN },
+    body: JSON.stringify({ kind: el("ruleKind").value, pattern_type: el("ruleType").value, pattern }),
+  });
+  el("rulePattern").value = "";
+  loadSecurity();
+}
+window.addGuardRule = addGuardRule;
+
+async function deleteGuardRule(id) {
+  if (!CMDTOKEN) { alert("set a join token (right panel) to delete rules"); return; }
+  await fetch(`/api/teams/${encodeURIComponent(TEAM)}/guard/rules/${id}`, {
+    method: "DELETE", headers: { "Authorization": "Bearer " + CMDTOKEN },
+  });
+  loadSecurity();
+}
+window.deleteGuardRule = deleteGuardRule;
 
 // ── Agent detail (opens in the center "Agent" tab) ───────────────────────────
 async function openDetail(agentId, name) {
@@ -340,6 +400,8 @@ function connectWS() {
       el("headCursor").textContent = "#" + head;
       prependEvent(f);
       scheduleRefresh();
+      if (f.kind && f.kind.indexOf("guard_") === 0 &&
+          el("tab-security") && el("tab-security").style.display !== "none") loadSecurity();
       if (f.kind && f.kind.indexOf("directive_") === 0) {
         const lbl = { directive_sent: "→ sent", directive_claimed: "claimed", directive_done: "✓ done", directive_failed: "✗ failed", directive_canceled: "canceled" }[f.kind] || f.kind;
         const summ = f.payload && f.payload.result_summary ? " — " + f.payload.result_summary : "";

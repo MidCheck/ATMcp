@@ -221,6 +221,12 @@ class Client:
         except Exception:
             return None
 
+    async def get_guard_request(self, request_id) -> dict | None:
+        try:
+            return await self.req("GET", f"/api/teams/{self.team}/guard/requests/{request_id}")
+        except Exception:
+            return None
+
     async def get_memory(self, session_id: str) -> list | None:
         try:
             r = await self.req("GET", f"/api/teams/{self.team}/sessions/{session_id}/memory")
@@ -467,15 +473,35 @@ def local_guard_deny(cmd: str) -> bool:
     return any(rx.search(cmd or "") for rx in _LOCAL_DENY)
 
 
-async def guard_allows(c: Client, command: str, session_id) -> tuple[bool, str | None]:
-    """Server guard decides; if it's unreachable, fall back to the local deny-list (fail-closed
-    on dangerous commands)."""
+async def guard_allows(c: Client, command: str, session_id, ask_timeout: float = 300.0) -> tuple[bool, str | None]:
+    """Server guard decides. 'ask' → poll for human approval (timeout → fail-closed deny). If the
+    server is unreachable, fall back to the local deny-list (fail-closed on dangerous commands)."""
     v = await c.guard_check(command, session_id)
-    if v is not None:
-        return (v.get("decision") != "deny", v.get("reason"))
-    if local_guard_deny(command):
-        return (False, "blocked by local deny-list (guard offline)")
-    return (True, None)
+    if v is None:
+        if local_guard_deny(command):
+            return (False, "blocked by local deny-list (guard offline)")
+        return (True, None)
+    decision = v.get("decision")
+    if decision == "deny":
+        return (False, v.get("reason"))
+    if decision == "ask":
+        rid = v.get("request_id")
+        if not rid:
+            return (False, "ask without a request id")
+        waited = 0.0
+        while waited < ask_timeout:
+            await asyncio.sleep(3.0)
+            waited += 3.0
+            req = await c.get_guard_request(rid)
+            if req is None:
+                continue
+            st = req.get("status")
+            if st == "allowed":
+                return (True, "approved by human")
+            if st == "denied":
+                return (False, "denied by human")
+        return (False, "approval timed out")
+    return (True, v.get("reason"))
 
 
 def _safe_path(base: str, rel: str) -> str | None:

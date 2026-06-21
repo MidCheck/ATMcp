@@ -78,6 +78,29 @@ async def test_team_regex_rule_and_bad_regex_rejected(team):
     assert bad["ok"] is False
 
 
+async def test_ask_rule_creates_pending_request_and_resolves(team):
+    tid = team["team_id"]
+    await guard_svc.add_rule(tid, "ask", "deploy", "substring", "needs human ok")
+    v = await guard_svc.check(tid, None, "deploy to prod", tool="run_bash")
+    assert v["decision"] == "ask" and v["request_id"]
+    rid = v["request_id"]
+    assert (await guard_svc.get_request(tid, rid))["status"] == "pending"
+    assert [r["id"] for r in await guard_svc.pending_requests(tid)] == [rid]
+    # approve it → worker would then proceed
+    assert (await guard_svc.resolve_request(tid, rid, approve=True, by="alice"))["ok"]
+    assert (await guard_svc.get_request(tid, rid))["status"] == "allowed"
+    assert await guard_svc.pending_requests(tid) == []
+    # re-resolving a settled request fails
+    assert (await guard_svc.resolve_request(tid, rid, approve=False))["ok"] is False
+
+
+async def test_ask_precedence_deny_still_wins(team):
+    tid = team["team_id"]
+    await guard_svc.add_rule(tid, "ask", "rm ", "substring")
+    # builtin deny outranks an ask match
+    assert (await guard_svc.check(tid, None, "rm -rf /"))["decision"] == "deny"
+
+
 # ── REST ─────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def client(store):
@@ -104,6 +127,22 @@ async def test_rest_guard_flow(client):
 
         ev = (await c.get("/api/teams/g/guard/events?decision=deny")).json()
         assert ev["count"] >= 1
+
+
+async def test_rest_guard_ask_flow(client):
+    async with client as c:
+        team = (await c.post("/api/teams", json={"name": "g"},
+                             headers={"X-Admin-Token": settings.admin_token})).json()
+        jt = team["join_token"]; auth = {"Authorization": f"Bearer {jt}"}
+        await c.post("/api/teams/g/guard/rules", json={"kind": "ask", "pattern": "publish"}, headers=auth)
+        v = (await c.post("/api/teams/g/guard/check", json={"command": "publish release"}, headers=auth)).json()
+        assert v["decision"] == "ask" and v["request_id"]
+        rid = v["request_id"]
+        assert (await c.get("/api/teams/g/guard/requests")).json()["count"] == 1
+        assert (await c.get(f"/api/teams/g/guard/requests/{rid}", headers=auth)).json()["status"] == "pending"
+        assert (await c.post(f"/api/teams/g/guard/requests/{rid}/resolve",
+                             json={"approve": True, "by": "me"}, headers=auth)).json()["status"] == "allowed"
+        assert (await c.get(f"/api/teams/g/guard/requests/{rid}", headers=auth)).json()["status"] == "allowed"
 
 
 async def test_rest_guard_check_requires_token(client):
