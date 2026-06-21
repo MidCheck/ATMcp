@@ -264,9 +264,13 @@ python scripts/atmcp_workbench_host.py --team <team> --token <jt> --name qwen \
 ```
 
 Every tool call (especially shell) passes through **Command Guard** — a per-team allow/deny gate
-with a built-in dangerous-command deny-list (audited; `/guard/*` API) and a local fail-closed
-fallback if the guard is unreachable. See **[`docs/workbench-design.md`](docs/workbench-design.md)**
-for the full design and roadmap.
+with a built-in dangerous-command deny-list (audited; `/guard/*` API), an `ask` tier that escalates
+gray-zone commands for human approval in the dashboard **Security** tab, and a local fail-closed
+fallback if the guard is unreachable.
+
+**New here?** Follow **[`docs/workbench-quickstart.md`](docs/workbench-quickstart.md)** — a step-by-step
+walkthrough (server → team → host → page), including running a **local Ollama model** as a
+tool-using agent. Full design/roadmap in **[`docs/workbench-design.md`](docs/workbench-design.md)**.
 
 ## Making agents actually use it
 
